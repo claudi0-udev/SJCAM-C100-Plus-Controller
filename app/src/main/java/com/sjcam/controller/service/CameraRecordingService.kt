@@ -62,6 +62,7 @@ class CameraRecordingService : Service() {
 
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
+    private var multicastLock: WifiManager.MulticastLock? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -80,20 +81,34 @@ class CameraRecordingService : Service() {
             return START_NOT_STICKY
         }
 
-        AppLogger.i(TAG, "CameraRecordingService: Iniciando en primer plano con WakeLock y WifiLock.")
+        AppLogger.i(TAG, "CameraRecordingService: Iniciando en primer plano con WakeLock, WifiLock y MulticastLock.")
         val notification = buildNotification()
 
-        val foregroundTypes = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            var types = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                types = types or ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
-            }
-            types
+        val foregroundTypes = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC or
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
         } else {
             0
         }
 
-        ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, foregroundTypes)
+        try {
+            ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, foregroundTypes)
+            AppLogger.i(TAG, "startForeground iniciado con tipos: $foregroundTypes")
+        } catch (e: Exception) {
+            AppLogger.w(TAG, "Error iniciando startForeground con tipos ($foregroundTypes): ${e.message}. Reintentando sin tipos...")
+            try {
+                ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, 0)
+            } catch (e2: Exception) {
+                AppLogger.e(TAG, "Fallo al iniciar startForeground: ${e2.message}", e2)
+            }
+        }
+
         acquireLocks()
 
         return START_STICKY
@@ -141,6 +156,21 @@ class CameraRecordingService : Service() {
         } catch (e: Exception) {
             AppLogger.w(TAG, "Error al adquirir WifiLock en servicio: ${e.message}")
         }
+
+        try {
+            if (multicastLock == null) {
+                val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+                multicastLock = wifiManager.createMulticastLock("com.sjcam.controller:ServiceMulticastLock").apply {
+                    setReferenceCounted(false)
+                }
+            }
+            if (multicastLock?.isHeld == false) {
+                multicastLock?.acquire()
+                AppLogger.i(TAG, "MulticastLock adquirido: Hardware Wi-Fi forzado a máxima potencia sin ahorro de energía.")
+            }
+        } catch (e: Exception) {
+            AppLogger.w(TAG, "Error al adquirir MulticastLock en servicio: ${e.message}")
+        }
     }
 
     private fun releaseLocks() {
@@ -159,6 +189,14 @@ class CameraRecordingService : Service() {
             }
         } catch (e: Exception) {
             AppLogger.w(TAG, "Error liberando WifiLock en servicio: ${e.message}")
+        }
+        try {
+            if (multicastLock?.isHeld == true) {
+                multicastLock?.release()
+                AppLogger.i(TAG, "MulticastLock en servicio liberado.")
+            }
+        } catch (e: Exception) {
+            AppLogger.w(TAG, "Error liberando MulticastLock en servicio: ${e.message}")
         }
     }
 

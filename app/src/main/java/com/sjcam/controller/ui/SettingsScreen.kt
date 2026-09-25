@@ -496,6 +496,44 @@ fun SettingsScreen(viewModel: CameraViewModel) {
             }
         }
 
+        // Tarjeta: Grabación en Segundo Plano / Modo Bolsillo
+        val ctx = androidx.compose.ui.platform.LocalContext.current
+        SettingsCard(title = "Segundo Plano y Bolsillo (Pantalla Apagada)", icon = Icons.Default.BatteryChargingFull) {
+            Text(
+                text = "Para garantizar que la grabación directa en el teléfono continúe escribiendo sin interrupciones cuando la pantalla se suspende o guardas el celular en el bolsillo, desactiva la optimización de batería de Android para esta app.",
+                color = Color.LightGray,
+                fontSize = 12.sp,
+                lineHeight = 16.sp
+            )
+
+            Button(
+                onClick = {
+                    try {
+                        val intent = android.content.Intent().apply {
+                            action = android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS
+                            data = android.net.Uri.parse("package:${ctx.packageName}")
+                            addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                        ctx.startActivity(intent)
+                    } catch (e: Exception) {
+                        try {
+                            val fallback = android.content.Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS).apply {
+                                addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                            }
+                            ctx.startActivity(fallback)
+                        } catch (_: Exception) {}
+                    }
+                },
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2C2C2C), contentColor = Color(0xFF00E5FF)),
+                shape = RoundedCornerShape(8.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(Icons.Default.PowerSettingsNew, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Permitir Segundo Plano Ilimitado", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+            }
+        }
+
         Spacer(Modifier.height(16.dp))
     }
 

@@ -25,17 +25,78 @@ class CameraNetworkManager(private val context: Context) {
     private val _currentWifiSsid = MutableStateFlow<String?>(null)
     val currentWifiSsid: StateFlow<String?> = _currentWifiSsid.asStateFlow()
 
+    private var appWifiLock: android.net.wifi.WifiManager.WifiLock? = null
+    private var appMulticastLock: android.net.wifi.WifiManager.MulticastLock? = null
+
+    private fun acquireWifiLocks() {
+        try {
+            val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as android.net.wifi.WifiManager
+            if (appWifiLock == null) {
+                val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    android.net.wifi.WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+                } else {
+                    @Suppress("DEPRECATION")
+                    android.net.wifi.WifiManager.WIFI_MODE_FULL_HIGH_PERF
+                }
+                appWifiLock = wifiManager.createWifiLock(mode, "com.sjcam.controller:AppWifiLock").apply {
+                    setReferenceCounted(false)
+                }
+            }
+            if (appWifiLock?.isHeld == false) {
+                appWifiLock?.acquire()
+                AppLogger.i(TAG, "WifiLock permanente adquirido para mantener activa la interfaz Wi-Fi.")
+            }
+
+            if (appMulticastLock == null) {
+                appMulticastLock = wifiManager.createMulticastLock("com.sjcam.controller:AppMulticastLock").apply {
+                    setReferenceCounted(false)
+                }
+            }
+            if (appMulticastLock?.isHeld == false) {
+                appMulticastLock?.acquire()
+                AppLogger.i(TAG, "MulticastLock permanente adquirido para evitar ahorro de energía del chip Wi-Fi.")
+            }
+        } catch (e: Exception) {
+            AppLogger.w(TAG, "Aviso adquiriendo locks de Wi-Fi en NetworkManager: ${e.message}")
+        }
+    }
+
+    private fun releaseWifiLocks() {
+        try {
+            if (appWifiLock?.isHeld == true) {
+                appWifiLock?.release()
+                AppLogger.i(TAG, "WifiLock permanente liberado.")
+            }
+        } catch (e: Exception) {
+            AppLogger.w(TAG, "Error liberando appWifiLock: ${e.message}")
+        }
+        try {
+            if (appMulticastLock?.isHeld == true) {
+                appMulticastLock?.release()
+                AppLogger.i(TAG, "MulticastLock permanente liberado.")
+            }
+        } catch (e: Exception) {
+            AppLogger.w(TAG, "Error liberando appMulticastLock: ${e.message}")
+        }
+    }
+
     /**
      * Fuerza a Android a enrutar todo el tráfico de red de la aplicación
      * exclusivamente por la interfaz Wi-Fi (incluso si no tiene salida a Internet).
      */
     fun bindProcessToWifiNetwork() {
         AppLogger.i(TAG, "Iniciando solicitud para forzar tráfico por Wi-Fi...")
+        acquireWifiLocks()
 
         val request = NetworkRequest.Builder()
             .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
             .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) // Importante: no requiere internet
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED)
             .build()
+
+        networkCallback?.let {
+            try { connectivityManager.unregisterNetworkCallback(it) } catch (_: Exception) {}
+        }
 
         networkCallback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
@@ -43,13 +104,27 @@ class CameraNetworkManager(private val context: Context) {
                 val bound = connectivityManager.bindProcessToNetwork(network)
                 AppLogger.i(TAG, "Wi-Fi detectada. bindProcessToNetwork ejecutado. Resultado: $bound")
                 _isBoundToWifi.value = bound
+                acquireWifiLocks()
             }
 
             override fun onLost(network: Network) {
                 super.onLost(network)
-                AppLogger.w(TAG, "Conexión Wi-Fi perdida. Desvinculando proceso de la red.")
-                connectivityManager.bindProcessToNetwork(null)
+                AppLogger.w(TAG, "Conexión Wi-Fi perdida. Reintentando vincular de inmediato...")
                 _isBoundToWifi.value = false
+                // Reintentar de forma inmediata para que Android mantenga la solicitud activa
+                try {
+                    val activeWifi = connectivityManager.allNetworks.firstOrNull { net ->
+                        val caps = connectivityManager.getNetworkCapabilities(net)
+                        caps != null && caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+                    }
+                    if (activeWifi != null) {
+                        val rebound = connectivityManager.bindProcessToNetwork(activeWifi)
+                        _isBoundToWifi.value = rebound
+                        AppLogger.i(TAG, "Revinculación inmediata a Wi-Fi activa: $rebound")
+                    }
+                } catch (e: Exception) {
+                    AppLogger.w(TAG, "Error durante reconexión rápida de red: ${e.message}")
+                }
             }
 
             override fun onUnavailable() {
@@ -174,6 +249,7 @@ class CameraNetworkManager(private val context: Context) {
                 specificNetworkCallback = null
             }
             _isBoundToWifi.value = false
+            releaseWifiLocks()
             AppLogger.i(TAG, "Binding de red Wi-Fi liberado.")
         } catch (e: Exception) {
             AppLogger.e(TAG, "Error liberando NetworkCallback: ${e.message}", e)

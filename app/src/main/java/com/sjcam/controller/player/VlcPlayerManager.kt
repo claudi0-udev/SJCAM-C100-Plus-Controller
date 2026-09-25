@@ -229,6 +229,10 @@ class VlcPlayerManager(private val context: Context) {
     }
 
     fun detachLayout() {
+        if (_isPhoneRecording.value) {
+            AppLogger.rtsp(TAG, "detachLayout omitido: Grabación en celular activa en segundo plano (manteniendo flujo y decoder activos).")
+            return
+        }
         try {
             if (isViewsAttached) {
                 mediaPlayer?.detachViews()

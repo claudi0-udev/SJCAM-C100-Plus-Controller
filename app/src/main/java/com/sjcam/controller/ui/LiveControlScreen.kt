@@ -195,7 +195,11 @@ fun LiveControlScreen(viewModel: CameraViewModel) {
 
             DisposableEffect(Unit) {
                 onDispose {
-                    viewModel.playerManager.detachLayout()
+                    if (!viewModel.playerManager.isPhoneRecording.value) {
+                        viewModel.playerManager.detachLayout()
+                    } else {
+                        com.sjcam.controller.data.AppLogger.rtsp("LiveControlScreen", "Pantalla bloqueada o cambio de pestaña: Preservando VLCVideoLayout para continuar grabación.")
+                    }
                 }
             }
 
