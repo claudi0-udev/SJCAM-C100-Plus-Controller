@@ -35,14 +35,27 @@ class MediaExplorer(
 
         // Método 1: Intentar mediante comando Novatek cmd=3015
         try {
-            val cmd3015Result = apiClient.executeCommand(3015)
+            var cmd3015Result = apiClient.executeCommand(3015)
             cmd3015Result.onSuccess { resp ->
                 val xml = resp.rawXml
-                AppLogger.d(TAG, "Respuesta cmd=3015:\n${xml.take(300)}")
+                AppLogger.i(TAG, "Respuesta cmd=3015:\n${xml.take(500)}")
                 val parsed = parseNovatekXml(xml, cameraBaseUrl)
                 if (parsed.isNotEmpty()) {
                     AppLogger.i(TAG, "cmd=3015 devolvió ${parsed.size} archivos.")
                     parsed.forEach { foundItems[it.relativePath] = it }
+                }
+            }
+
+            // Si vino vacío, intentar con parámetro 1 o 0
+            if (foundItems.isEmpty()) {
+                val cmdWithPar = apiClient.executeCommand(3015, "1")
+                cmdWithPar.onSuccess { resp ->
+                    val xml = resp.rawXml
+                    if (xml.isNotBlank()) {
+                        AppLogger.i(TAG, "Respuesta cmd=3015&par=1:\n${xml.take(500)}")
+                        val parsed = parseNovatekXml(xml, cameraBaseUrl)
+                        parsed.forEach { foundItems[it.relativePath] = it }
+                    }
                 }
             }
         } catch (e: Exception) {
@@ -74,24 +87,44 @@ class MediaExplorer(
         resultList
     }
 
+    /**
+     * Limpia y normaliza cualquier ruta devuelta por Novatek (DOS A:\DCIM\..., contrabarras, etc.)
+     * Devuelve Pair(cleanRelativePath, fileName).
+     */
+    fun normalizeNovatekPath(rawPath: String): Pair<String, String> {
+        var clean = rawPath.trim().replace('\\', '/')
+        clean = clean.replaceFirst(Regex("^[a-zA-Z]:"), "")
+        while (clean.contains("//")) {
+            clean = clean.replace("//", "/")
+        }
+        val fileName = clean.substringAfterLast("/")
+        if (!clean.contains("/") || clean == "/$fileName" || clean == fileName) {
+            val isVid = isVideoFile(fileName)
+            clean = if (isVid) "/DCIM/MOVIE/$fileName" else "/DCIM/PHOTO/$fileName"
+        }
+        if (!clean.startsWith("/")) {
+            clean = "/$clean"
+        }
+        return Pair(clean, fileName)
+    }
+
     private fun parseNovatekXml(xml: String, baseUrl: String): List<CameraMediaItem> {
         val list = mutableListOf<CameraMediaItem>()
 
-        // 1. Buscar etiquetas <File>...</File> o <Name>...</Name>
-        val fileBlockRegex = Pattern.compile("<File>(.*?)</File>", Pattern.DOTALL or Pattern.CASE_INSENSITIVE)
+        // 1. Buscar bloques <File ...>...</File> o <File ... />
+        val fileBlockRegex = Pattern.compile("<File(?:\\s+[^>]*)?>(.*?)</File>", Pattern.DOTALL or Pattern.CASE_INSENSITIVE)
         val matcher = fileBlockRegex.matcher(xml)
 
         while (matcher.find()) {
             val block = matcher.group(1) ?: continue
             val nameRegex = Pattern.compile("<(?:Name|Fpath|Path)>(.*?)</(?:Name|Fpath|Path)>", Pattern.CASE_INSENSITIVE)
-            val sizeRegex = Pattern.compile("<Size>(\\d+)</Size>", Pattern.CASE_INSENSITIVE)
+            val sizeRegex = Pattern.compile("<(?:Size|Length)>(\\d+)</(?:Size|Length)>", Pattern.CASE_INSENSITIVE)
             val timeRegex = Pattern.compile("<(?:Time|Date)>(.*?)</(?:Time|Date)>", Pattern.CASE_INSENSITIVE)
 
             val mName = nameRegex.matcher(block)
             if (mName.find()) {
-                val fullPath = mName.group(1)?.trim() ?: ""
-                val cleanPath = if (fullPath.startsWith("/")) fullPath else "/$fullPath"
-                val fileName = cleanPath.substringAfterLast("/")
+                val rawPath = mName.group(1)?.trim() ?: ""
+                val (cleanPath, fileName) = normalizeNovatekPath(rawPath)
                 val mSize = sizeRegex.matcher(block)
                 val size = if (mSize.find()) mSize.group(1)?.toLongOrNull() ?: 0 else 0
                 val mTime = timeRegex.matcher(block)
@@ -108,29 +141,57 @@ class MediaExplorer(
                             httpUrl = "$baseUrl$cleanPath",
                             isVideo = isVideo,
                             sizeBytes = size,
-                            dateTimeStr = time
+                            dateTimeStr = time,
+                            rawNovatekPath = rawPath
                         )
                     )
                 }
             }
         }
 
-        // 2. Si no había bloques <File>, buscar etiquetas <Name> sueltas
+        // 2. Si no había bloques <File>, buscar etiquetas con atributos <File NAME="..." SIZE="..." />
         if (list.isEmpty()) {
-            val nameOnlyRegex = Pattern.compile("<(?:Name|String)>(.*?(?:\\.(?:mp4|mov|jpg|jpeg)))</(?:Name|String)>", Pattern.CASE_INSENSITIVE)
-            val mNames = nameOnlyRegex.matcher(xml)
-            while (mNames.find()) {
-                val pathStr = mNames.group(1)?.trim() ?: continue
-                val cleanPath = if (pathStr.startsWith("/")) pathStr else "/DCIM/$pathStr"
-                val fileName = cleanPath.substringAfterLast("/")
-                list.add(
-                    CameraMediaItem(
-                        name = fileName,
-                        relativePath = cleanPath,
-                        httpUrl = "$baseUrl$cleanPath",
-                        isVideo = isVideoFile(fileName)
+            val fileAttrRegex = Pattern.compile("<File\\s+[^>]*NAME=[\"']([^\"']+)[\"'][^>]*>", Pattern.CASE_INSENSITIVE)
+            val mAttr = fileAttrRegex.matcher(xml)
+            while (mAttr.find()) {
+                val rawPath = mAttr.group(1)?.trim() ?: continue
+                val (cleanPath, fileName) = normalizeNovatekPath(rawPath)
+                val isVideo = isVideoFile(fileName)
+                val isPhoto = isPhotoFile(fileName)
+                if (isVideo || isPhoto) {
+                    list.add(
+                        CameraMediaItem(
+                            name = fileName,
+                            relativePath = cleanPath,
+                            httpUrl = "$baseUrl$cleanPath",
+                            isVideo = isVideo,
+                            rawNovatekPath = rawPath
+                        )
                     )
-                )
+                }
+            }
+        }
+
+        // 3. Si sigue vacío, buscar etiquetas <Name> o <Fpath> sueltas
+        if (list.isEmpty()) {
+            val looseRegex = Pattern.compile("<(?:Name|Fpath|Path)>(.*?(?:\\.(?:mp4|mov|jpg|jpeg)))</(?:Name|Fpath|Path)>", Pattern.CASE_INSENSITIVE)
+            val mLoose = looseRegex.matcher(xml)
+            while (mLoose.find()) {
+                val rawPath = mLoose.group(1)?.trim() ?: continue
+                val (cleanPath, fileName) = normalizeNovatekPath(rawPath)
+                val isVideo = isVideoFile(fileName)
+                val isPhoto = isPhotoFile(fileName)
+                if (isVideo || isPhoto) {
+                    list.add(
+                        CameraMediaItem(
+                            name = fileName,
+                            relativePath = cleanPath,
+                            httpUrl = "$baseUrl$cleanPath",
+                            isVideo = isVideo,
+                            rawNovatekPath = rawPath
+                        )
+                    )
+                }
             }
         }
 
@@ -150,14 +211,15 @@ class MediaExplorer(
                 href.startsWith("http") -> href.substringAfter(baseUrl, href)
                 else -> "${baseDir.trimEnd('/')}/$href"
             }
-            val fileName = fullRelPath.substringAfterLast("/")
+            val (cleanPath, fileName) = normalizeNovatekPath(fullRelPath)
 
             list.add(
                 CameraMediaItem(
                     name = fileName,
-                    relativePath = fullRelPath,
-                    httpUrl = "$baseUrl$fullRelPath",
-                    isVideo = isVideoFile(fileName)
+                    relativePath = cleanPath,
+                    httpUrl = "$baseUrl$cleanPath",
+                    isVideo = isVideoFile(fileName),
+                    rawNovatekPath = fullRelPath
                 )
             )
         }

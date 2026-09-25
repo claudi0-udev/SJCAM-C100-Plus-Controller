@@ -17,6 +17,10 @@
     <!-- Instalación de Actualizaciones de la App -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
+    <!-- Almacenamiento multimedia -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
+
     <application
         android:allowBackup="true"
         android:icon="@android:drawable/ic_menu_camera"
@@ -24,6 +28,7 @@
         android:roundIcon="@android:drawable/ic_menu_camera"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Material.NoActionBar"
+        android:requestLegacyExternalStorage="true"
         android:usesCleartextTraffic="true">
         
         <activity

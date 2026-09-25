@@ -254,6 +254,7 @@ fun GalleryScreen(viewModel: CameraViewModel) {
     selectedPhoto?.let { item ->
         PhotoViewerModal(
             item = item,
+            viewModel = viewModel,
             onDismiss = { viewModel.closeMediaViewer() },
             onDownload = { viewModel.downloadMedia(item) }
         )
@@ -385,6 +386,26 @@ fun VideoPlayerModal(
     viewModel: CameraViewModel,
     onDismiss: () -> Unit
 ) {
+    val downloadedFiles by viewModel.downloadedFiles.collectAsState()
+    val localPath = downloadedFiles[item.name] ?: downloadedFiles[item.relativePath]
+    val isDownloaded = localPath != null && File(localPath).exists() && File(localPath).length() > 0
+
+    val videoPlayUrl = remember(item, isDownloaded, localPath) {
+        if (isDownloaded && localPath != null) {
+            Uri.fromFile(File(localPath)).toString()
+        } else {
+            item.httpUrl
+        }
+    }
+
+    DisposableEffect(videoPlayUrl) {
+        viewModel.playerManager.playMediaFile(videoPlayUrl)
+        onDispose {
+            viewModel.playerManager.stopStream()
+            viewModel.playerManager.detachLayout()
+        }
+    }
+
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false)
@@ -399,8 +420,10 @@ fun VideoPlayerModal(
                 factory = { ctx ->
                     VLCVideoLayout(ctx).apply {
                         viewModel.playerManager.attachLayout(this)
-                        viewModel.playerManager.startStream(item.httpUrl, forceTcp = true)
                     }
+                },
+                update = { layout ->
+                    viewModel.playerManager.attachLayout(layout)
                 },
                 modifier = Modifier.fillMaxSize()
             )
@@ -425,25 +448,25 @@ fun VideoPlayerModal(
                         overflow = TextOverflow.Ellipsis
                     )
                     Text(
-                        text = "Streaming directo desde MicroSD (${item.formattedSize})",
+                        text = if (isDownloaded) "Reproduciendo archivo descargado localmente"
+                        else "Streaming directo (${item.formattedSize})",
                         color = Color(0xFF00E5FF),
                         fontSize = 11.sp
                     )
                 }
 
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    IconButton(
-                        onClick = { viewModel.downloadMedia(item) },
-                        colors = IconButtonDefaults.iconButtonColors(contentColor = Color.White)
-                    ) {
-                        Icon(Icons.Default.Download, contentDescription = "Descargar")
+                    if (!isDownloaded) {
+                        IconButton(
+                            onClick = { viewModel.downloadMedia(item) },
+                            colors = IconButtonDefaults.iconButtonColors(contentColor = Color.White)
+                        ) {
+                            Icon(Icons.Default.Download, contentDescription = "Descargar")
+                        }
                     }
 
                     IconButton(
-                        onClick = {
-                            viewModel.playerManager.stopStream()
-                            onDismiss()
-                        },
+                        onClick = onDismiss,
                         colors = IconButtonDefaults.iconButtonColors(contentColor = Color.White)
                     ) {
                         Icon(Icons.Default.Close, contentDescription = "Cerrar")
@@ -457,35 +480,75 @@ fun VideoPlayerModal(
 @Composable
 fun PhotoViewerModal(
     item: CameraMediaItem,
+    viewModel: CameraViewModel,
     onDismiss: () -> Unit,
     onDownload: () -> Unit
 ) {
     var imageBitmap by remember { mutableStateOf<ImageBitmap?>(null) }
     var isLoading by remember { mutableStateOf(true) }
-    var errorMsg by remember { mutableStateOf<String?>(null) }
+    var statusText by remember { mutableStateOf("Cargando foto...") }
 
-    LaunchedEffect(item.httpUrl) {
+    val downloadedFiles by viewModel.downloadedFiles.collectAsState()
+    val localPath = downloadedFiles[item.name] ?: downloadedFiles[item.relativePath]
+    val isDownloaded = localPath != null && File(localPath).exists() && File(localPath).length() > 0
+
+    LaunchedEffect(item.relativePath, isDownloaded) {
         isLoading = true
         withContext(Dispatchers.IO) {
-            try {
-                val client = OkHttpClient()
-                val request = Request.Builder().url(item.httpUrl).build()
-                client.newCall(request).execute().use { response ->
-                    if (response.isSuccessful) {
-                        val bytes = response.body?.bytes()
-                        if (bytes != null) {
-                            val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                            imageBitmap = bmp?.asImageBitmap()
-                        }
-                    } else {
-                        errorMsg = "HTTP ${response.code}"
+            // 1. Cargar archivo local si ya se descargó
+            if (isDownloaded && localPath != null) {
+                try {
+                    statusText = "Cargando foto desde almacenamiento local..."
+                    val bmp = decodeSampledBitmap(File(localPath).absolutePath, 2048, 2048)
+                    if (bmp != null) {
+                        imageBitmap = bmp.asImageBitmap()
+                        isLoading = false
+                        return@withContext
                     }
+                } catch (e: Exception) {
+                    com.sjcam.controller.data.AppLogger.w("PhotoViewer", "Fallo cargando foto local: ${e.message}")
                 }
-            } catch (e: Exception) {
-                errorMsg = e.message
-            } finally {
-                isLoading = false
             }
+
+            // 2. Probar candidatos HTTP desde la cámara
+            val candidates = item.getCandidateUrls(viewModel.apiClient.cameraBaseUrl)
+            val client = OkHttpClient.Builder()
+                .connectTimeout(8, java.util.concurrent.TimeUnit.SECONDS)
+                .readTimeout(25, java.util.concurrent.TimeUnit.SECONDS)
+                .build()
+
+            var success = false
+            for (url in candidates) {
+                statusText = "Descargando previsualización:\n$url"
+                com.sjcam.controller.data.AppLogger.i("PhotoViewer", "Solicitando foto a: $url")
+                try {
+                    val request = Request.Builder().url(url).get().build()
+                    client.newCall(request).execute().use { response ->
+                        if (response.isSuccessful) {
+                            val bytes = response.body?.bytes()
+                            if (bytes != null && bytes.isNotEmpty()) {
+                                val bmp = decodeSampledBitmapFromBytes(bytes, 2048, 2048)
+                                if (bmp != null) {
+                                    imageBitmap = bmp.asImageBitmap()
+                                    success = true
+                                    com.sjcam.controller.data.AppLogger.i("PhotoViewer", "¡Foto cargada exitosamente (${bytes.size} bytes) desde $url!")
+                                    return@use
+                                }
+                            }
+                        } else {
+                            com.sjcam.controller.data.AppLogger.w("PhotoViewer", "HTTP ${response.code} en $url")
+                        }
+                    }
+                    if (success) break
+                } catch (e: Exception) {
+                    com.sjcam.controller.data.AppLogger.w("PhotoViewer", "Error conectando a $url: ${e.message}")
+                }
+            }
+
+            if (!success) {
+                statusText = "No se pudo cargar la imagen directamente desde la cámara.\nPuedes pulsar 'Descargar' para guardarla completa en tu teléfono."
+            }
+            isLoading = false
         }
     }
 
@@ -500,10 +563,19 @@ fun PhotoViewerModal(
         ) {
             // Imagen o indicador de carga
             if (isLoading) {
-                CircularProgressIndicator(
-                    modifier = Modifier.align(Alignment.Center),
-                    color = Color(0xFF00E5FF)
-                )
+                Column(
+                    modifier = Modifier.align(Alignment.Center).padding(24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    CircularProgressIndicator(color = Color(0xFF00E5FF))
+                    Text(
+                        text = statusText,
+                        color = Color.LightGray,
+                        fontSize = 12.sp,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                    )
+                }
             } else if (imageBitmap != null) {
                 androidx.compose.foundation.Image(
                     bitmap = imageBitmap!!,
@@ -514,11 +586,19 @@ fun PhotoViewerModal(
                     contentScale = androidx.compose.ui.layout.ContentScale.Fit
                 )
             } else {
-                Text(
-                    text = "No se pudo cargar la imagen: ${errorMsg ?: "Error desconocido"}",
-                    color = Color.Red,
-                    modifier = Modifier.align(Alignment.Center)
-                )
+                Column(
+                    modifier = Modifier.align(Alignment.Center).padding(24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Icon(Icons.Default.BrokenImage, contentDescription = null, tint = Color.Red, modifier = Modifier.size(48.dp))
+                    Text(
+                        text = statusText,
+                        color = Color(0xFFFF8A80),
+                        fontSize = 12.sp,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                    )
+                }
             }
 
             // Barra superior
@@ -540,8 +620,10 @@ fun PhotoViewerModal(
                 )
 
                 Row {
-                    IconButton(onClick = onDownload, colors = IconButtonDefaults.iconButtonColors(contentColor = Color.White)) {
-                        Icon(Icons.Default.Download, contentDescription = "Descargar")
+                    if (!isDownloaded) {
+                        IconButton(onClick = onDownload, colors = IconButtonDefaults.iconButtonColors(contentColor = Color.White)) {
+                            Icon(Icons.Default.Download, contentDescription = "Descargar")
+                        }
                     }
                     IconButton(onClick = onDismiss, colors = IconButtonDefaults.iconButtonColors(contentColor = Color.White)) {
                         Icon(Icons.Default.Close, contentDescription = "Cerrar")
@@ -550,6 +632,44 @@ fun PhotoViewerModal(
             }
         }
     }
+}
+
+private fun decodeSampledBitmap(path: String, reqWidth: Int, reqHeight: Int): android.graphics.Bitmap? {
+    return try {
+        val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(path, options)
+        options.inSampleSize = calculateInSampleSize(options, reqWidth, reqHeight)
+        options.inJustDecodeBounds = false
+        BitmapFactory.decodeFile(path, options)
+    } catch (_: Exception) {
+        null
+    }
+}
+
+private fun decodeSampledBitmapFromBytes(bytes: ByteArray, reqWidth: Int, reqHeight: Int): android.graphics.Bitmap? {
+    return try {
+        val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+        options.inSampleSize = calculateInSampleSize(options, reqWidth, reqHeight)
+        options.inJustDecodeBounds = false
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+    } catch (_: Exception) {
+        null
+    }
+}
+
+private fun calculateInSampleSize(options: BitmapFactory.Options, reqWidth: Int, reqHeight: Int): Int {
+    val height = options.outHeight
+    val width = options.outWidth
+    var inSampleSize = 1
+    if (height > reqHeight || width > reqWidth) {
+        val halfHeight = height / 2
+        val halfWidth = width / 2
+        while ((halfHeight / inSampleSize) >= reqHeight && (halfWidth / inSampleSize) >= reqWidth) {
+            inSampleSize *= 2
+        }
+    }
+    return inSampleSize
 }
 
 private fun openLocalFile(context: android.content.Context, file: File, isVideo: Boolean) {
@@ -567,7 +687,6 @@ private fun openLocalFile(context: android.content.Context, file: File, isVideo:
         }
         context.startActivity(intent)
     } catch (e: Exception) {
-        // Fallback: intentar abrir con chooser genérico
         try {
             val uri = FileProvider.getUriForFile(context, "${context.packageName}.provider", file)
             val shareIntent = Intent(Intent.ACTION_SEND).apply {

@@ -151,11 +151,15 @@ class VlcPlayerManager(private val context: Context) {
     }
 
     fun attachLayout(layout: VLCVideoLayout) {
-        currentLayout = layout
         val player = mediaPlayer ?: return
-        if (isViewsAttached) return
+        if (currentLayout === layout && isViewsAttached) return
 
         try {
+            if (isViewsAttached) {
+                player.detachViews()
+                isViewsAttached = false
+            }
+            currentLayout = layout
             player.attachViews(layout, null, false, false)
             isViewsAttached = true
             AppLogger.rtsp(TAG, "VLCVideoLayout adjuntado correctamente.")
@@ -174,6 +178,47 @@ class VlcPlayerManager(private val context: Context) {
             currentLayout = null
         } catch (e: Exception) {
             AppLogger.e(TAG, "Error al desadjuntar VLCVideoLayout: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Reproduce un archivo de video grabado (HTTP o local file://)
+     * sin opciones agresivas de RTSP live y sin el watchdog de reconexión.
+     */
+    fun playMediaFile(url: String) {
+        AppLogger.i(TAG, "Iniciando reproducción de archivo de video en LibVLC: $url")
+        _errorMessage.value = null
+        shouldBePlaying = false
+        watchdogJob?.cancel()
+        watchdogJob = null
+
+        initializePlayer()
+
+        val player = mediaPlayer ?: return
+        val vlc = libVLC ?: return
+
+        try {
+            player.stop()
+
+            val media = Media(vlc, Uri.parse(url)).apply {
+                setHWDecoderEnabled(true, false)
+                addOption(":network-caching=1500")
+                addOption(":file-caching=1000")
+            }
+
+            player.media = media
+            media.release()
+
+            currentLayout?.let {
+                attachLayout(it)
+            }
+
+            player.play()
+            _isPlaying.value = true
+            AppLogger.i(TAG, "Reproducción de video iniciada en LibVLC.")
+        } catch (e: Exception) {
+            AppLogger.e(TAG, "Error reproduciendo archivo de video: ${e.message}", e)
+            _errorMessage.value = e.message
         }
     }
 

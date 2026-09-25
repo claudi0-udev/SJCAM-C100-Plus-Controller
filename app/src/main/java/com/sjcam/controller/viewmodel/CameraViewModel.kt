@@ -111,7 +111,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     fun downloadMedia(item: com.sjcam.controller.data.CameraMediaItem) {
         viewModelScope.launch {
-            downloadManager.downloadFile(item)
+            downloadManager.downloadFile(item, apiClient.cameraBaseUrl)
         }
     }
 
