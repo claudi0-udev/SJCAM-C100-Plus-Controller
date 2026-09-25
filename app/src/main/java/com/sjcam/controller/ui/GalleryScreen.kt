@@ -3,16 +3,24 @@ package com.sjcam.controller.ui
 import android.content.Intent
 import android.graphics.BitmapFactory
 import android.net.Uri
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBackIos
+import androidx.compose.material.icons.automirrored.filled.ArrowForwardIos
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -250,13 +258,19 @@ fun GalleryScreen(viewModel: CameraViewModel) {
         )
     }
 
-    // Modal de Visualización de Foto
+    // Modal de Visualización de Foto con navegación deslizante
+    val photoList = remember(mediaItems) { mediaItems.filter { !it.isVideo } }
     selectedPhoto?.let { item ->
+        val initialIndex = remember(item, photoList) {
+            val idx = photoList.indexOfFirst { it.relativePath == item.relativePath }
+            if (idx >= 0) idx else 0
+        }
         PhotoViewerModal(
-            item = item,
+            photos = photoList,
+            initialIndex = initialIndex,
             viewModel = viewModel,
             onDismiss = { viewModel.closeMediaViewer() },
-            onDownload = { viewModel.downloadMedia(item) }
+            onDownload = { photoToDownload -> viewModel.downloadMedia(photoToDownload) }
         )
     }
 }
@@ -390,6 +404,15 @@ fun VideoPlayerModal(
     val localPath = downloadedFiles[item.name] ?: downloadedFiles[item.relativePath]
     val isDownloaded = localPath != null && File(localPath).exists() && File(localPath).length() > 0
 
+    val isPlaying by viewModel.playerManager.isPlaying.collectAsState()
+    val mediaTime by viewModel.playerManager.mediaTime.collectAsState()
+    val mediaLength by viewModel.playerManager.mediaLength.collectAsState()
+    val mediaPosition by viewModel.playerManager.mediaPosition.collectAsState()
+
+    var isDragging by remember { mutableStateOf(false) }
+    var dragPosition by remember { mutableStateOf(0f) }
+    var showControls by remember { mutableStateOf(true) }
+
     val videoPlayUrl = remember(item, isDownloaded, localPath) {
         if (isDownloaded && localPath != null) {
             Uri.fromFile(File(localPath)).toString()
@@ -414,6 +437,7 @@ fun VideoPlayerModal(
             modifier = Modifier
                 .fillMaxSize()
                 .background(Color.Black)
+                .clickable { showControls = !showControls }
         ) {
             // Reproductor VLC embebido
             AndroidView(
@@ -428,7 +452,265 @@ fun VideoPlayerModal(
                 modifier = Modifier.fillMaxSize()
             )
 
-            // Barra superior flotante
+            // Controles de Navegación y Barra de Tiempo
+            AnimatedVisibility(
+                visible = showControls,
+                enter = fadeIn(),
+                exit = fadeOut(),
+                modifier = Modifier.fillMaxSize()
+            ) {
+                Box(modifier = Modifier.fillMaxSize()) {
+                    // Barra superior flotante
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .align(Alignment.TopCenter)
+                            .background(Color(0xB3000000))
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = item.name,
+                                color = Color.White,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                text = if (isDownloaded) "Archivo descargado localmente"
+                                else "Streaming directo MicroSD (${item.formattedSize})",
+                                color = Color(0xFF00E5FF),
+                                fontSize = 11.sp
+                            )
+                        }
+
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            if (!isDownloaded) {
+                                IconButton(
+                                    onClick = { viewModel.downloadMedia(item) },
+                                    colors = IconButtonDefaults.iconButtonColors(contentColor = Color.White)
+                                ) {
+                                    Icon(Icons.Default.Download, contentDescription = "Descargar")
+                                }
+                            }
+
+                            IconButton(
+                                onClick = onDismiss,
+                                colors = IconButtonDefaults.iconButtonColors(contentColor = Color.White)
+                            ) {
+                                Icon(Icons.Default.Close, contentDescription = "Cerrar")
+                            }
+                        }
+                    }
+
+                    // Botón central flotante de Play/Pausa rápido
+                    IconButton(
+                        onClick = { viewModel.playerManager.togglePlayPause() },
+                        modifier = Modifier
+                            .size(64.dp)
+                            .align(Alignment.Center)
+                            .background(Color(0x80000000), androidx.compose.foundation.shape.CircleShape)
+                    ) {
+                        Icon(
+                            imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                            contentDescription = if (isPlaying) "Pausar" else "Reproducir",
+                            tint = Color.White,
+                            modifier = Modifier.size(36.dp)
+                        )
+                    }
+
+                    // Barra inferior de navegación / Barra de progreso SeekBar
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .align(Alignment.BottomCenter)
+                            .background(Color(0xB3000000))
+                            .padding(horizontal = 16.dp, vertical = 12.dp)
+                    ) {
+                        // Slider / Barra de progreso interactiva
+                        val currentSliderPos = if (isDragging) dragPosition else mediaPosition
+                        Slider(
+                            value = currentSliderPos.coerceIn(0f, 1f),
+                            onValueChange = {
+                                isDragging = true
+                                dragPosition = it
+                            },
+                            onValueChangeFinished = {
+                                viewModel.playerManager.seekToPosition(dragPosition)
+                                isDragging = false
+                            },
+                            modifier = Modifier.fillMaxWidth().height(24.dp),
+                            colors = SliderDefaults.colors(
+                                thumbColor = Color(0xFF00E5FF),
+                                activeTrackColor = Color(0xFF00E5FF),
+                                inactiveTrackColor = Color(0x55FFFFFF)
+                            )
+                        )
+
+                        Spacer(Modifier.height(4.dp))
+
+                        // Tiempos y botones de salto ±10s
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = formatTimeMs(mediaTime),
+                                color = Color.White,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+
+                            // Controles de transporte
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(16.dp)
+                            ) {
+                                IconButton(
+                                    onClick = { viewModel.playerManager.jumpSeconds(-10) },
+                                    modifier = Modifier.size(36.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Default.Replay10,
+                                        contentDescription = "Retroceder 10s",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(24.dp)
+                                    )
+                                }
+
+                                IconButton(
+                                    onClick = { viewModel.playerManager.togglePlayPause() },
+                                    modifier = Modifier
+                                        .size(42.dp)
+                                        .background(Color(0xFF00E5FF), androidx.compose.foundation.shape.CircleShape)
+                                ) {
+                                    Icon(
+                                        imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                                        contentDescription = if (isPlaying) "Pausar" else "Reproducir",
+                                        tint = Color.Black,
+                                        modifier = Modifier.size(24.dp)
+                                    )
+                                }
+
+                                IconButton(
+                                    onClick = { viewModel.playerManager.jumpSeconds(10) },
+                                    modifier = Modifier.size(36.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Default.Forward10,
+                                        contentDescription = "Adelantar 10s",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(24.dp)
+                                    )
+                                }
+                            }
+
+                            Text(
+                                text = if (mediaLength > 0) formatTimeMs(mediaLength) else "--:--",
+                                color = Color.LightGray,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun PhotoViewerModal(
+    photos: List<CameraMediaItem>,
+    initialIndex: Int,
+    viewModel: CameraViewModel,
+    onDismiss: () -> Unit,
+    onDownload: (CameraMediaItem) -> Unit
+) {
+    if (photos.isEmpty()) {
+        onDismiss()
+        return
+    }
+
+    val pagerState = rememberPagerState(
+        initialPage = initialIndex.coerceIn(0, photos.size - 1),
+        pageCount = { photos.size }
+    )
+    val coroutineScope = rememberCoroutineScope()
+    val currentPhoto = photos.getOrNull(pagerState.currentPage) ?: photos.first()
+
+    val downloadedFiles by viewModel.downloadedFiles.collectAsState()
+    val isCurrentDownloaded = (downloadedFiles[currentPhoto.name] != null || downloadedFiles[currentPhoto.relativePath] != null)
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color(0xF2000000))
+        ) {
+            // Carrusel deslizable táctil (Swipe)
+            HorizontalPager(
+                state = pagerState,
+                modifier = Modifier.fillMaxSize()
+            ) { page ->
+                val photo = photos[page]
+                SinglePhotoPage(photo = photo, viewModel = viewModel)
+            }
+
+            // Flecha flotante Anterior
+            if (pagerState.currentPage > 0) {
+                IconButton(
+                    onClick = {
+                        coroutineScope.launch {
+                            pagerState.animateScrollToPage(pagerState.currentPage - 1)
+                        }
+                    },
+                    modifier = Modifier
+                        .align(Alignment.CenterStart)
+                        .padding(start = 10.dp)
+                        .size(44.dp)
+                        .background(Color(0x80000000), androidx.compose.foundation.shape.CircleShape)
+                ) {
+                    Icon(
+                        Icons.AutoMirrored.Filled.ArrowBackIos,
+                        contentDescription = "Foto Anterior",
+                        tint = Color.White,
+                        modifier = Modifier.size(20.dp).offset(x = 2.dp)
+                    )
+                }
+            }
+
+            // Flecha flotante Siguiente
+            if (pagerState.currentPage < photos.size - 1) {
+                IconButton(
+                    onClick = {
+                        coroutineScope.launch {
+                            pagerState.animateScrollToPage(pagerState.currentPage + 1)
+                        }
+                    },
+                    modifier = Modifier
+                        .align(Alignment.CenterEnd)
+                        .padding(end = 10.dp)
+                        .size(44.dp)
+                        .background(Color(0x80000000), androidx.compose.foundation.shape.CircleShape)
+                ) {
+                    Icon(
+                        Icons.AutoMirrored.Filled.ArrowForwardIos,
+                        contentDescription = "Foto Siguiente",
+                        tint = Color.White,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+            }
+
+            // Barra superior flotante con contador y descarga
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -440,7 +722,7 @@ fun VideoPlayerModal(
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = item.name,
+                        text = currentPhoto.name,
                         color = Color.White,
                         fontSize = 14.sp,
                         fontWeight = FontWeight.Bold,
@@ -448,20 +730,19 @@ fun VideoPlayerModal(
                         overflow = TextOverflow.Ellipsis
                     )
                     Text(
-                        text = if (isDownloaded) "Reproduciendo archivo descargado localmente"
-                        else "Streaming directo (${item.formattedSize})",
+                        text = "${pagerState.currentPage + 1} de ${photos.size}  •  ${currentPhoto.formattedSize}",
                         color = Color(0xFF00E5FF),
                         fontSize = 11.sp
                     )
                 }
 
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (!isDownloaded) {
+                    if (!isCurrentDownloaded) {
                         IconButton(
-                            onClick = { viewModel.downloadMedia(item) },
+                            onClick = { onDownload(currentPhoto) },
                             colors = IconButtonDefaults.iconButtonColors(contentColor = Color.White)
                         ) {
-                            Icon(Icons.Default.Download, contentDescription = "Descargar")
+                            Icon(Icons.Default.Download, contentDescription = "Descargar Foto")
                         }
                     }
 
@@ -478,21 +759,19 @@ fun VideoPlayerModal(
 }
 
 @Composable
-fun PhotoViewerModal(
-    item: CameraMediaItem,
-    viewModel: CameraViewModel,
-    onDismiss: () -> Unit,
-    onDownload: () -> Unit
+fun SinglePhotoPage(
+    photo: CameraMediaItem,
+    viewModel: CameraViewModel
 ) {
-    var imageBitmap by remember { mutableStateOf<ImageBitmap?>(null) }
-    var isLoading by remember { mutableStateOf(true) }
-    var statusText by remember { mutableStateOf("Cargando foto...") }
+    var imageBitmap by remember(photo.relativePath) { mutableStateOf<ImageBitmap?>(null) }
+    var isLoading by remember(photo.relativePath) { mutableStateOf(true) }
+    var statusText by remember(photo.relativePath) { mutableStateOf("Cargando foto...") }
 
     val downloadedFiles by viewModel.downloadedFiles.collectAsState()
-    val localPath = downloadedFiles[item.name] ?: downloadedFiles[item.relativePath]
+    val localPath = downloadedFiles[photo.name] ?: downloadedFiles[photo.relativePath]
     val isDownloaded = localPath != null && File(localPath).exists() && File(localPath).length() > 0
 
-    LaunchedEffect(item.relativePath, isDownloaded) {
+    LaunchedEffect(photo.relativePath, isDownloaded) {
         isLoading = true
         withContext(Dispatchers.IO) {
             // 1. Cargar archivo local si ya se descargó
@@ -511,7 +790,7 @@ fun PhotoViewerModal(
             }
 
             // 2. Probar candidatos HTTP desde la cámara
-            val candidates = item.getCandidateUrls(viewModel.apiClient.cameraBaseUrl)
+            val candidates = photo.getCandidateUrls(viewModel.apiClient.cameraBaseUrl)
             val client = OkHttpClient.Builder()
                 .connectTimeout(8, java.util.concurrent.TimeUnit.SECONDS)
                 .readTimeout(25, java.util.concurrent.TimeUnit.SECONDS)
@@ -519,8 +798,7 @@ fun PhotoViewerModal(
 
             var success = false
             for (url in candidates) {
-                statusText = "Descargando previsualización:\n$url"
-                com.sjcam.controller.data.AppLogger.i("PhotoViewer", "Solicitando foto a: $url")
+                statusText = "Descargando:\n$url"
                 try {
                     val request = Request.Builder().url(url).get().build()
                     client.newCall(request).execute().use { response ->
@@ -531,106 +809,77 @@ fun PhotoViewerModal(
                                 if (bmp != null) {
                                     imageBitmap = bmp.asImageBitmap()
                                     success = true
-                                    com.sjcam.controller.data.AppLogger.i("PhotoViewer", "¡Foto cargada exitosamente (${bytes.size} bytes) desde $url!")
                                     return@use
                                 }
                             }
-                        } else {
-                            com.sjcam.controller.data.AppLogger.w("PhotoViewer", "HTTP ${response.code} en $url")
                         }
                     }
                     if (success) break
-                } catch (e: Exception) {
-                    com.sjcam.controller.data.AppLogger.w("PhotoViewer", "Error conectando a $url: ${e.message}")
-                }
+                } catch (_: Exception) {}
             }
 
             if (!success) {
-                statusText = "No se pudo cargar la imagen directamente desde la cámara.\nPuedes pulsar 'Descargar' para guardarla completa en tu teléfono."
+                statusText = "No se pudo cargar la imagen directamente desde la cámara."
             }
             isLoading = false
         }
     }
 
-    Dialog(
-        onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false)
+    Box(
+        modifier = Modifier.fillMaxSize(),
+        contentAlignment = Alignment.Center
     ) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Color(0xE6000000))
-        ) {
-            // Imagen o indicador de carga
-            if (isLoading) {
-                Column(
-                    modifier = Modifier.align(Alignment.Center).padding(24.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    CircularProgressIndicator(color = Color(0xFF00E5FF))
-                    Text(
-                        text = statusText,
-                        color = Color.LightGray,
-                        fontSize = 12.sp,
-                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
-                    )
-                }
-            } else if (imageBitmap != null) {
-                androidx.compose.foundation.Image(
-                    bitmap = imageBitmap!!,
-                    contentDescription = item.name,
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(bottom = 60.dp),
-                    contentScale = androidx.compose.ui.layout.ContentScale.Fit
-                )
-            } else {
-                Column(
-                    modifier = Modifier.align(Alignment.Center).padding(24.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    Icon(Icons.Default.BrokenImage, contentDescription = null, tint = Color.Red, modifier = Modifier.size(48.dp))
-                    Text(
-                        text = statusText,
-                        color = Color(0xFFFF8A80),
-                        fontSize = 12.sp,
-                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
-                    )
-                }
-            }
-
-            // Barra superior
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .align(Alignment.TopCenter)
-                    .background(Color(0x99000000))
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+        if (isLoading) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+                modifier = Modifier.padding(24.dp)
             ) {
+                CircularProgressIndicator(color = Color(0xFF00E5FF))
                 Text(
-                    text = item.name,
-                    color = Color.White,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier.weight(1f)
+                    text = statusText,
+                    color = Color.LightGray,
+                    fontSize = 12.sp,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
                 )
-
-                Row {
-                    if (!isDownloaded) {
-                        IconButton(onClick = onDownload, colors = IconButtonDefaults.iconButtonColors(contentColor = Color.White)) {
-                            Icon(Icons.Default.Download, contentDescription = "Descargar")
-                        }
-                    }
-                    IconButton(onClick = onDismiss, colors = IconButtonDefaults.iconButtonColors(contentColor = Color.White)) {
-                        Icon(Icons.Default.Close, contentDescription = "Cerrar")
-                    }
-                }
+            }
+        } else if (imageBitmap != null) {
+            androidx.compose.foundation.Image(
+                bitmap = imageBitmap!!,
+                contentDescription = photo.name,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(vertical = 48.dp),
+                contentScale = androidx.compose.ui.layout.ContentScale.Fit
+            )
+        } else {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier.padding(24.dp)
+            ) {
+                Icon(Icons.Default.BrokenImage, contentDescription = null, tint = Color.Red, modifier = Modifier.size(48.dp))
+                Text(
+                    text = statusText,
+                    color = Color(0xFFFF8A80),
+                    fontSize = 12.sp,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                )
             }
         }
+    }
+}
+
+private fun formatTimeMs(ms: Long): String {
+    if (ms <= 0) return "00:00"
+    val totalSec = ms / 1000
+    val sec = totalSec % 60
+    val min = (totalSec / 60) % 60
+    val hr = totalSec / 3600
+    return if (hr > 0) {
+        String.format(java.util.Locale.US, "%d:%02d:%02d", hr, min, sec)
+    } else {
+        String.format(java.util.Locale.US, "%02d:%02d", min, sec)
     }
 }
 

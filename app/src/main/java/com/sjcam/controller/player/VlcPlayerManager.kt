@@ -33,6 +33,15 @@ class VlcPlayerManager(private val context: Context) {
     private val _isPlaying = MutableStateFlow(false)
     val isPlaying: StateFlow<Boolean> = _isPlaying.asStateFlow()
 
+    private val _mediaTime = MutableStateFlow(0L)
+    val mediaTime: StateFlow<Long> = _mediaTime.asStateFlow()
+
+    private val _mediaLength = MutableStateFlow(0L)
+    val mediaLength: StateFlow<Long> = _mediaLength.asStateFlow()
+
+    private val _mediaPosition = MutableStateFlow(0f)
+    val mediaPosition: StateFlow<Float> = _mediaPosition.asStateFlow()
+
     private val _errorMessage = MutableStateFlow<String?>(null)
     val errorMessage: StateFlow<String?> = _errorMessage.asStateFlow()
 
@@ -79,6 +88,13 @@ class VlcPlayerManager(private val context: Context) {
                     }
                     MediaPlayer.Event.TimeChanged -> {
                         lastPacketTimestamp = System.currentTimeMillis()
+                        _mediaTime.value = event.timeChanged
+                    }
+                    MediaPlayer.Event.LengthChanged -> {
+                        _mediaLength.value = event.lengthChanged
+                    }
+                    MediaPlayer.Event.PositionChanged -> {
+                        _mediaPosition.value = event.positionChanged
                     }
                     MediaPlayer.Event.Paused -> {
                         _isPlaying.value = false
@@ -89,6 +105,7 @@ class VlcPlayerManager(private val context: Context) {
                     MediaPlayer.Event.EndReached -> {
                         AppLogger.rtsp(TAG, "VLC: Sesión RTSP finalizada o reiniciada por la cámara (EndReached).")
                         _isPlaying.value = false
+                        _mediaPosition.value = 1f
                         if (shouldBePlaying) {
                             triggerAutoReconnect("EndReached de LIVE555")
                         }
@@ -215,10 +232,63 @@ class VlcPlayerManager(private val context: Context) {
 
             player.play()
             _isPlaying.value = true
+            _mediaTime.value = 0L
+            _mediaLength.value = 0L
+            _mediaPosition.value = 0f
             AppLogger.i(TAG, "Reproducción de video iniciada en LibVLC.")
         } catch (e: Exception) {
             AppLogger.e(TAG, "Error reproduciendo archivo de video: ${e.message}", e)
             _errorMessage.value = e.message
+        }
+    }
+
+    fun seekToPosition(ratio: Float) {
+        val player = mediaPlayer ?: return
+        try {
+            val clamped = ratio.coerceIn(0f, 1f)
+            player.position = clamped
+            _mediaPosition.value = clamped
+        } catch (e: Exception) {
+            AppLogger.e(TAG, "Error en seekToPosition: ${e.message}")
+        }
+    }
+
+    fun seekToTime(timeMs: Long) {
+        val player = mediaPlayer ?: return
+        try {
+            player.time = timeMs.coerceAtLeast(0L)
+            _mediaTime.value = player.time
+        } catch (e: Exception) {
+            AppLogger.e(TAG, "Error en seekToTime: ${e.message}")
+        }
+    }
+
+    fun togglePlayPause() {
+        val player = mediaPlayer ?: return
+        try {
+            if (player.isPlaying) {
+                player.pause()
+                _isPlaying.value = false
+            } else {
+                player.play()
+                _isPlaying.value = true
+            }
+        } catch (e: Exception) {
+            AppLogger.e(TAG, "Error en togglePlayPause: ${e.message}")
+        }
+    }
+
+    fun jumpSeconds(deltaSec: Int) {
+        val player = mediaPlayer ?: return
+        try {
+            val current = player.time
+            val length = player.length
+            val maxLen = if (length > 0) length else Long.MAX_VALUE
+            val target = (current + deltaSec * 1000L).coerceIn(0L, maxLen)
+            player.time = target
+            _mediaTime.value = target
+        } catch (e: Exception) {
+            AppLogger.e(TAG, "Error en jumpSeconds: ${e.message}")
         }
     }
 
