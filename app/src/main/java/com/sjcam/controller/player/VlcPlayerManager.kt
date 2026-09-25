@@ -51,6 +51,10 @@ class VlcPlayerManager(private val context: Context) {
     private val _phoneRecordPath = MutableStateFlow<String?>(null)
     val phoneRecordPath: StateFlow<String?> = _phoneRecordPath.asStateFlow()
 
+    private var recordStartTime: Long = 0L
+    private var recordTargetDir: java.io.File? = null
+    private var activeRecordPath: String? = null
+
     var onRecordFinished: ((java.io.File) -> Unit)? = null
 
     fun initializePlayer() {
@@ -67,6 +71,7 @@ class VlcPlayerManager(private val context: Context) {
             "--avcodec-threads=2",
             "--clock-jitter=0",
             "--clock-synchro=0",
+            "--input-record-native",
             "-vvv"
         )
         try {
@@ -134,15 +139,12 @@ class VlcPlayerManager(private val context: Context) {
                         _isPhoneRecording.value = rec
                         if (rec) {
                             _phoneRecordPath.value = path
+                            if (!path.isNullOrBlank()) {
+                                activeRecordPath = path
+                            }
                         } else {
                             _phoneRecordPath.value = null
-                            if (!path.isNullOrBlank()) {
-                                val file = java.io.File(path)
-                                if (file.exists() && file.length() > 0) {
-                                    AppLogger.i(TAG, "Archivo de video grabado en celular: ${file.absolutePath} (${file.length()} bytes)")
-                                    onRecordFinished?.invoke(file)
-                                }
-                            }
+                            handleRecordingFinished(path)
                         }
                     }
                     MediaPlayer.Event.Vout -> {
@@ -374,6 +376,10 @@ class VlcPlayerManager(private val context: Context) {
         if (!targetDir.exists()) {
             targetDir.mkdirs()
         }
+        recordStartTime = System.currentTimeMillis()
+        recordTargetDir = targetDir
+        activeRecordPath = null
+
         AppLogger.i(TAG, "Solicitando inicio de grabación local LibVLC en: ${targetDir.absolutePath}")
         return try {
             val started = player.record(targetDir.absolutePath)
@@ -398,6 +404,71 @@ class VlcPlayerManager(private val context: Context) {
             AppLogger.e(TAG, "Error al detener player.record: ${e.message}", e)
         }
         _isPhoneRecording.value = false
+
+        // Disparo de respaldo si LibVLC tarda o no emite el evento RecordChanged al detener
+        playerScope.launch {
+            delay(1500)
+            if (recordStartTime > 0L) {
+                AppLogger.d(TAG, "Fallback disparado para procesar archivo grabado...")
+                handleRecordingFinished(null)
+            }
+        }
+    }
+
+    private fun handleRecordingFinished(eventPath: String?) {
+        val savedStartTime = recordStartTime
+        val savedDir = recordTargetDir
+        val savedActivePath = activeRecordPath
+
+        // Resetear trackers para evitar doble invocación
+        recordStartTime = 0L
+        activeRecordPath = null
+
+        playerScope.launch(Dispatchers.IO) {
+            try {
+                // Esperar 1 segundo para permitir que LibVLC cierre los descriptores y el atom del archivo
+                delay(1000)
+                val candidate = findRecordedFile(eventPath, savedActivePath, savedDir, savedStartTime)
+                if (candidate != null && candidate.exists() && candidate.length() > 0) {
+                    AppLogger.i(TAG, "Archivo grabado en celular listo: ${candidate.absolutePath} (${candidate.length()} bytes)")
+                    withContext(Dispatchers.Main) {
+                        onRecordFinished?.invoke(candidate)
+                    }
+                } else {
+                    AppLogger.w(TAG, "Aviso: No se encontró ningún archivo grabado en: ${savedDir?.absolutePath}")
+                }
+            } catch (e: Exception) {
+                AppLogger.e(TAG, "Error al procesar archivo de video grabado: ${e.message}", e)
+            }
+        }
+    }
+
+    private fun findRecordedFile(
+        eventPath: String?,
+        activePath: String?,
+        targetDir: java.io.File?,
+        startTime: Long
+    ): java.io.File? {
+        // 1. Probar ruta devuelta por el evento de LibVLC si no es nula
+        if (!eventPath.isNullOrBlank()) {
+            val f = java.io.File(eventPath)
+            if (f.exists() && f.length() > 0) return f
+        }
+        // 2. Probar ruta capturada cuando inició la grabación
+        if (!activePath.isNullOrBlank()) {
+            val f = java.io.File(activePath)
+            if (f.exists() && f.length() > 0) return f
+        }
+        // 3. Escanear el directorio de destino por el archivo creado/modificado durante la sesión
+        val dir = targetDir ?: return null
+        if (!dir.exists() || !dir.isDirectory) return null
+
+        val files = dir.listFiles() ?: return null
+        val minTime = if (startTime > 0L) startTime - 5000L else 0L
+
+        return files
+            .filter { it.isFile && it.length() > 0 && it.lastModified() >= minTime }
+            .maxByOrNull { it.lastModified() }
     }
 
     fun stopStream() {

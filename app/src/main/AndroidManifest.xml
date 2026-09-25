@@ -21,8 +21,14 @@
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
 
-    <!-- Mantener grabación activa en segundo plano con pantalla apagada en el bolsillo -->
+    <!-- Notificaciones para Android 13+ (Foreground Service) -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- Foreground Service para mantener grabación activa en segundo plano con pantalla apagada en el bolsillo -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
     <application
         android:allowBackup="true"
@@ -54,6 +60,12 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
+
+        <!-- Servicio en primer plano para blindar Wi-Fi y grabación con pantalla bloqueada -->
+        <service
+            android:name=".service.CameraRecordingService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice|dataSync" />
 
     </application>
 

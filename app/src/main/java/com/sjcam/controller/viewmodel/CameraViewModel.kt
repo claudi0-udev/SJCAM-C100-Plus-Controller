@@ -11,6 +11,7 @@ import com.sjcam.controller.data.MediaFilter
 import com.sjcam.controller.network.CameraNetworkManager
 import com.sjcam.controller.network.SjcamApiClient
 import com.sjcam.controller.player.VlcPlayerManager
+import com.sjcam.controller.service.CameraRecordingService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -60,17 +61,38 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
         // Callback cuando LibVLC finaliza la escritura de un clip local en disco
         playerManager.onRecordFinished = { recordedFile ->
-            viewModelScope.launch {
-                AppLogger.i(TAG, "Clip en celular finalizado: ${recordedFile.absolutePath} (${recordedFile.length()} bytes)")
-                val uri = downloadManager.saveToPublicGallery(recordedFile, isVideo = true)
-                android.media.MediaScannerConnection.scanFile(
-                    getApplication(),
-                    arrayOf(recordedFile.absolutePath),
-                    arrayOf("video/mp4"),
-                    null
-                )
-                _phoneRecordMessage.value = "¡Video guardado en el teléfono! (${recordedFile.name})"
-                downloadManager.checkExistingDownloads()
+            viewModelScope.launch(Dispatchers.IO) {
+                val fileLength = recordedFile.length()
+                AppLogger.i(TAG, "Clip en celular finalizado: ${recordedFile.absolutePath} ($fileLength bytes)")
+                if (fileLength > 0) {
+                    val uri = downloadManager.saveToPublicGallery(recordedFile, isVideo = true)
+                    val sizeMb = String.format(java.util.Locale.US, "%.1f", fileLength / (1024.0 * 1024.0))
+                    withContext(Dispatchers.Main) {
+                        if (uri != null) {
+                            _phoneRecordMessage.value = "¡Video guardado en Movies/SJCAM! (${recordedFile.name} - ${sizeMb} MB)"
+                            AppLogger.i(TAG, "Video guardado con éxito en galería pública Movies/SJCAM: $uri")
+                        } else {
+                            _phoneRecordMessage.value = "¡Video guardado! (${recordedFile.name} - ${sizeMb} MB)"
+                        }
+                    }
+                    android.media.MediaScannerConnection.scanFile(
+                        getApplication(),
+                        arrayOf(recordedFile.absolutePath),
+                        arrayOf("video/mp4"),
+                        null
+                    )
+                    downloadManager.checkExistingDownloads()
+                    // Si se guardó en la galería pública (MediaStore), eliminar el archivo temporal
+                    // para no duplicar espacio en el almacenamiento interno del teléfono
+                    if (uri != null) {
+                        try {
+                            recordedFile.delete()
+                        } catch (e: Exception) {
+                            AppLogger.w(TAG, "No se pudo borrar temporal local: ${e.message}")
+                        }
+                    }
+                }
+                CameraRecordingService.stop(getApplication())
                 releaseWakeLock()
             }
         }
@@ -242,6 +264,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 playerManager.stopPhoneRecording()
                 phoneRecordTimerJob?.cancel()
                 phoneRecordTimerJob = null
+                CameraRecordingService.stop(getApplication())
                 releaseWakeLock()
             } else {
                 AppLogger.i(TAG, "Iniciando grabación directa en el celular...")
@@ -262,9 +285,12 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                     "SJCAM_Local"
                 ).apply { mkdirs() }
 
+                // Iniciar Foreground Service para blindar Wi-Fi y mantener CPU activa en bolsillo
+                CameraRecordingService.start(getApplication())
+                acquireWakeLock()
+
                 val started = playerManager.startPhoneRecording(moviesDir)
                 if (started) {
-                    acquireWakeLock()
                     _phoneRecordingSeconds.value = 0
                     phoneRecordTimerJob?.cancel()
                     phoneRecordTimerJob = viewModelScope.launch {
@@ -275,6 +301,8 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                     }
                     _phoneRecordMessage.value = "Grabando directo en el teléfono (Movies/SJCAM)..."
                 } else {
+                    CameraRecordingService.stop(getApplication())
+                    releaseWakeLock()
                     _phoneRecordMessage.value = "Error: no se pudo iniciar la grabación en el teléfono"
                 }
             }
@@ -832,6 +860,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     override fun onCleared() {
         super.onCleared()
         stopHeartbeat()
+        CameraRecordingService.stop(getApplication())
         releaseWakeLock()
         playerManager.release()
         networkManager.releaseNetworkBinding()
