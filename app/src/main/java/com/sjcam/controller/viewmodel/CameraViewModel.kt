@@ -385,7 +385,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
                     // Cuando el chip Novatek empieza o termina de escribir en el archivo MP4 de la SD,
                     // reinicia la sesión RTSP de LIVE555. Reanudamos el stream automáticamente:
-                    if (wasLiveStreaming) {
+                    if (wasLiveStreaming && !playerManager.isPhoneRecording.value) {
                         AppLogger.i(TAG, "Re-sincronizando previsualización RTSP tras cambio de grabación...")
                         delay(700)
                         apiClient.enableLiveStream()
@@ -512,7 +512,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
                             // Si se presionó el botón físico y la previsualización en vivo está activa,
                             // resincronizar LibVLC para que el video continúe sin interrupción
-                            if (_cameraStatus.value.isLiveStreaming) {
+                            if (_cameraStatus.value.isLiveStreaming && !playerManager.isPhoneRecording.value) {
                                 delay(600)
                                 val currentStatus = _cameraStatus.value
                                 playerManager.startStream(currentStatus.rtspUrl, currentStatus.forceTcp)

@@ -117,19 +117,25 @@ class VlcPlayerManager(private val context: Context) {
                     }
                     MediaPlayer.Event.EndReached -> {
                         AppLogger.rtsp(TAG, "VLC: Sesión RTSP finalizada o reiniciada por la cámara (EndReached).")
-                        _isPlaying.value = false
-                        _mediaPosition.value = 1f
-                        if (shouldBePlaying) {
-                            triggerAutoReconnect("EndReached de LIVE555")
+                        if (!_isPhoneRecording.value) {
+                            _isPlaying.value = false
+                            _mediaPosition.value = 1f
+                            if (shouldBePlaying) {
+                                triggerAutoReconnect("EndReached de LIVE555")
+                            }
                         }
                     }
                     MediaPlayer.Event.EncounteredError -> {
                         val msg = "Aviso: Error en stream VLC RTSP."
                         AppLogger.w(TAG, msg)
                         _errorMessage.value = msg
-                        _isPlaying.value = false
-                        if (shouldBePlaying) {
-                            triggerAutoReconnect("EncounteredError")
+                        if (!_isPhoneRecording.value) {
+                            _isPlaying.value = false
+                            if (shouldBePlaying) {
+                                triggerAutoReconnect("EncounteredError")
+                            }
+                        } else {
+                            AppLogger.w(TAG, "EncounteredError ignorado mientras se graba en el celular.")
                         }
                     }
                     MediaPlayer.Event.RecordChanged -> {
@@ -169,9 +175,13 @@ class VlcPlayerManager(private val context: Context) {
     }
 
     private fun triggerAutoReconnect(reason: String) {
+        if (_isPhoneRecording.value) {
+            AppLogger.w(TAG, "Watchdog: Grabación activa en celular ($reason). Ignorando auto-reconexión para no cortar clip.")
+            return
+        }
         playerScope.launch {
             delay(800)
-            if (shouldBePlaying) {
+            if (shouldBePlaying && !_isPhoneRecording.value) {
                 val url = lastRtspUrl
                 if (!url.isNullOrBlank()) {
                     AppLogger.rtsp(TAG, "Watchdog: Auto-reconectando stream ($reason)...")
@@ -186,6 +196,11 @@ class VlcPlayerManager(private val context: Context) {
         watchdogJob = playerScope.launch {
             while (isActive && shouldBePlaying) {
                 delay(3000)
+                if (_isPhoneRecording.value) {
+                    // Mantener vivo el timestamp mientras graba directo al teléfono (incluso con pantalla apagada en el bolsillo)
+                    lastPacketTimestamp = System.currentTimeMillis()
+                    continue
+                }
                 val elapsed = System.currentTimeMillis() - lastPacketTimestamp
                 if (shouldBePlaying && _isPlaying.value && elapsed > 6500) {
                     AppLogger.w(TAG, "Watchdog: Sin paquetes durante ${elapsed / 1000}s. Reiniciando conexión RTSP...")
@@ -205,9 +220,9 @@ class VlcPlayerManager(private val context: Context) {
                 isViewsAttached = false
             }
             currentLayout = layout
-            player.attachViews(layout, null, false, false)
+            player.attachViews(layout, null, false, true) // TextureView para transiciones limpias y resistencia a pantalla apagada
             isViewsAttached = true
-            AppLogger.rtsp(TAG, "VLCVideoLayout adjuntado correctamente.")
+            AppLogger.rtsp(TAG, "VLCVideoLayout adjuntado correctamente (TextureView).")
         } catch (e: Exception) {
             AppLogger.e(TAG, "Error al adjuntar VLCVideoLayout: ${e.message}", e)
         }
@@ -321,6 +336,10 @@ class VlcPlayerManager(private val context: Context) {
     }
 
     fun startStream(rtspUrl: String, forceTcp: Boolean = true) {
+        if (_isPhoneRecording.value && _isPlaying.value && rtspUrl == lastRtspUrl) {
+            AppLogger.i(TAG, "startStream: Ya se encuentra reproduciendo y grabando el stream ($rtspUrl). Ignorando reinicio.")
+            return
+        }
         AppLogger.rtsp(TAG, "Iniciando stream VLC RTSP hacia: $rtspUrl (forceTcp=$forceTcp)")
         _errorMessage.value = null
 
@@ -338,7 +357,8 @@ class VlcPlayerManager(private val context: Context) {
             player.stop()
 
             val media = Media(vlc, Uri.parse(rtspUrl)).apply {
-                setHWDecoderEnabled(true, false)
+                // Decodificación por software avcodec para evitar que MediaCodec muera al suspender la pantalla
+                setHWDecoderEnabled(false, false)
                 addOption(":network-caching=250")
                 addOption(":live-caching=250")
                 addOption(":clock-jitter=0")
@@ -471,7 +491,11 @@ class VlcPlayerManager(private val context: Context) {
             .maxByOrNull { it.lastModified() }
     }
 
-    fun stopStream() {
+    fun stopStream(force: Boolean = false) {
+        if (_isPhoneRecording.value && !force) {
+            AppLogger.w(TAG, "stopStream ignorado porque la grabación en celular está activa.")
+            return
+        }
         AppLogger.rtsp(TAG, "Deteniendo stream VLC RTSP.")
         if (_isPhoneRecording.value) {
             stopPhoneRecording()
