@@ -45,6 +45,14 @@ class VlcPlayerManager(private val context: Context) {
     private val _errorMessage = MutableStateFlow<String?>(null)
     val errorMessage: StateFlow<String?> = _errorMessage.asStateFlow()
 
+    private val _isPhoneRecording = MutableStateFlow(false)
+    val isPhoneRecording: StateFlow<Boolean> = _isPhoneRecording.asStateFlow()
+
+    private val _phoneRecordPath = MutableStateFlow<String?>(null)
+    val phoneRecordPath: StateFlow<String?> = _phoneRecordPath.asStateFlow()
+
+    var onRecordFinished: ((java.io.File) -> Unit)? = null
+
     fun initializePlayer() {
         if (mediaPlayer != null) return
 
@@ -117,6 +125,24 @@ class VlcPlayerManager(private val context: Context) {
                         _isPlaying.value = false
                         if (shouldBePlaying) {
                             triggerAutoReconnect("EncounteredError")
+                        }
+                    }
+                    MediaPlayer.Event.RecordChanged -> {
+                        val rec = event.recording
+                        val path = event.recordPath
+                        AppLogger.rtsp(TAG, "VLC Event RecordChanged: recording=$rec, path=$path")
+                        _isPhoneRecording.value = rec
+                        if (rec) {
+                            _phoneRecordPath.value = path
+                        } else {
+                            _phoneRecordPath.value = null
+                            if (!path.isNullOrBlank()) {
+                                val file = java.io.File(path)
+                                if (file.exists() && file.length() > 0) {
+                                    AppLogger.i(TAG, "Archivo de video grabado en celular: ${file.absolutePath} (${file.length()} bytes)")
+                                    onRecordFinished?.invoke(file)
+                                }
+                            }
                         }
                     }
                     MediaPlayer.Event.Vout -> {
@@ -338,8 +364,47 @@ class VlcPlayerManager(private val context: Context) {
         }
     }
 
+    fun startPhoneRecording(targetDir: java.io.File): Boolean {
+        initializePlayer()
+        val player = mediaPlayer
+        if (player == null) {
+            AppLogger.e(TAG, "No se puede iniciar grabación: MediaPlayer es nulo.")
+            return false
+        }
+        if (!targetDir.exists()) {
+            targetDir.mkdirs()
+        }
+        AppLogger.i(TAG, "Solicitando inicio de grabación local LibVLC en: ${targetDir.absolutePath}")
+        return try {
+            val started = player.record(targetDir.absolutePath)
+            if (started) {
+                _isPhoneRecording.value = true
+                AppLogger.i(TAG, "¡LibVLC comenzó a escribir stream directo a disco local!")
+            } else {
+                AppLogger.w(TAG, "player.record devolvió false.")
+            }
+            started
+        } catch (e: Exception) {
+            AppLogger.e(TAG, "Excepción al iniciar player.record: ${e.message}", e)
+            false
+        }
+    }
+
+    fun stopPhoneRecording() {
+        AppLogger.i(TAG, "Deteniendo grabación local LibVLC...")
+        try {
+            mediaPlayer?.record(null)
+        } catch (e: Exception) {
+            AppLogger.e(TAG, "Error al detener player.record: ${e.message}", e)
+        }
+        _isPhoneRecording.value = false
+    }
+
     fun stopStream() {
         AppLogger.rtsp(TAG, "Deteniendo stream VLC RTSP.")
+        if (_isPhoneRecording.value) {
+            stopPhoneRecording()
+        }
         shouldBePlaying = false
         watchdogJob?.cancel()
         watchdogJob = null
@@ -353,6 +418,9 @@ class VlcPlayerManager(private val context: Context) {
 
     fun release() {
         AppLogger.rtsp(TAG, "Liberando recursos de LibVLC...")
+        if (_isPhoneRecording.value) {
+            stopPhoneRecording()
+        }
         shouldBePlaying = false
         watchdogJob?.cancel()
         watchdogJob = null

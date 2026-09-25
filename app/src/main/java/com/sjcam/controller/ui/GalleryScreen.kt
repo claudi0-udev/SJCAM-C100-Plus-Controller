@@ -58,6 +58,14 @@ fun GalleryScreen(viewModel: CameraViewModel) {
     val downloadedFiles by viewModel.downloadedFiles.collectAsState()
 
     val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+
+    var isSelectionMode by remember { mutableStateOf(false) }
+    var selectedRelPaths by remember { mutableStateOf(setOf<String>()) }
+    var itemPendingDelete by remember { mutableStateOf<CameraMediaItem?>(null) }
+    var showBatchDeleteConfirm by remember { mutableStateOf(false) }
+    var isDeleting by remember { mutableStateOf(false) }
+    var deleteStatusMessage by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(Unit) {
         if (mediaItems.isEmpty()) {
@@ -79,38 +87,145 @@ fun GalleryScreen(viewModel: CameraViewModel) {
             .background(Color(0xFF141414))
             .padding(horizontal = 16.dp, vertical = 12.dp)
     ) {
-        // Encabezado
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column {
-                Text(
-                    text = "Galería MicroSD",
-                    color = Color.White,
-                    fontSize = 20.sp,
-                    fontWeight = FontWeight.Bold
-                )
-                Text(
-                    text = "Archivos multimedia en la cámara",
-                    color = Color.Gray,
-                    fontSize = 12.sp
-                )
-            }
-
-            IconButton(
-                onClick = { viewModel.refreshMediaList() },
-                colors = IconButtonDefaults.iconButtonColors(contentColor = Color(0xFF00E5FF))
+        // Encabezado (Normal o Modo Selección)
+        if (isSelectionMode) {
+            Surface(
+                color = Color(0xFF222222),
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.fillMaxWidth()
             ) {
-                if (isScanning) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(20.dp),
-                        strokeWidth = 2.dp,
-                        color = Color(0xFF00E5FF)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(
+                            onClick = {
+                                isSelectionMode = false
+                                selectedRelPaths = emptySet()
+                            }
+                        ) {
+                            Icon(Icons.Default.Close, contentDescription = "Cancelar selección", tint = Color.White)
+                        }
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            text = "${selectedRelPaths.size} seleccionados",
+                            color = Color.White,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        // Seleccionar Todo / Nada
+                        TextButton(
+                            onClick = {
+                                if (selectedRelPaths.size == filteredItems.size) {
+                                    selectedRelPaths = emptySet()
+                                } else {
+                                    selectedRelPaths = filteredItems.map { it.relativePath }.toSet()
+                                }
+                            }
+                        ) {
+                            Text(
+                                text = if (selectedRelPaths.size == filteredItems.size) "Deseleccionar" else "Todo",
+                                color = Color(0xFF00E5FF),
+                                fontSize = 12.sp
+                            )
+                        }
+
+                        // Botón Eliminar Seleccionados
+                        IconButton(
+                            onClick = { showBatchDeleteConfirm = true },
+                            enabled = selectedRelPaths.isNotEmpty() && !isDeleting,
+                            colors = IconButtonDefaults.iconButtonColors(
+                                contentColor = Color(0xFFFF5252),
+                                disabledContentColor = Color.DarkGray
+                            )
+                        ) {
+                            Icon(Icons.Default.Delete, contentDescription = "Eliminar seleccionados")
+                        }
+                    }
+                }
+            }
+        } else {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column {
+                    Text(
+                        text = "Galería MicroSD",
+                        color = Color.White,
+                        fontSize = 20.sp,
+                        fontWeight = FontWeight.Bold
                     )
-                } else {
-                    Icon(Icons.Default.Refresh, contentDescription = "Escanear MicroSD")
+                    Text(
+                        text = "Archivos multimedia en la cámara",
+                        color = Color.Gray,
+                        fontSize = 12.sp
+                    )
+                }
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (mediaItems.isNotEmpty()) {
+                        TextButton(
+                            onClick = { isSelectionMode = true },
+                            colors = ButtonDefaults.textButtonColors(contentColor = Color(0xFF00E5FF))
+                        ) {
+                            Icon(Icons.Default.Checklist, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Seleccionar", fontSize = 12.sp)
+                        }
+                    }
+
+                    IconButton(
+                        onClick = { viewModel.refreshMediaList() },
+                        colors = IconButtonDefaults.iconButtonColors(contentColor = Color(0xFF00E5FF))
+                    ) {
+                        if (isScanning) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(20.dp),
+                                strokeWidth = 2.dp,
+                                color = Color(0xFF00E5FF)
+                            )
+                        } else {
+                            Icon(Icons.Default.Refresh, contentDescription = "Escanear MicroSD")
+                        }
+                    }
+                }
+            }
+        }
+
+        if (deleteStatusMessage != null) {
+            Spacer(Modifier.height(8.dp))
+            Surface(
+                color = Color(0xFF2C2222),
+                shape = RoundedCornerShape(8.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (isDeleting) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp,
+                            color = Color(0xFFFF8A80)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                    }
+                    Text(
+                        text = deleteStatusMessage ?: "",
+                        color = Color(0xFFFF8A80),
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium
+                    )
                 }
             }
         }
@@ -225,16 +340,34 @@ fun GalleryScreen(viewModel: CameraViewModel) {
                     val isDownloaded = downloadedFiles.containsKey(item.name) || downloadedFiles.containsKey(item.relativePath)
                     val localPath = downloadedFiles[item.name] ?: downloadedFiles[item.relativePath]
                     val progress = downloadProgress[item.relativePath]
+                    val isSelected = item.relativePath in selectedRelPaths
 
                     MediaItemCard(
                         item = item,
                         isDownloaded = isDownloaded,
                         downloadProgress = progress,
-                        onPlayOrView = {
-                            if (item.isVideo) {
-                                viewModel.playVideo(item)
+                        isSelectionMode = isSelectionMode,
+                        isSelected = isSelected,
+                        onToggleSelect = {
+                            selectedRelPaths = if (isSelected) {
+                                selectedRelPaths - item.relativePath
                             } else {
-                                viewModel.viewPhoto(item)
+                                selectedRelPaths + item.relativePath
+                            }
+                        },
+                        onPlayOrView = {
+                            if (isSelectionMode) {
+                                selectedRelPaths = if (isSelected) {
+                                    selectedRelPaths - item.relativePath
+                                } else {
+                                    selectedRelPaths + item.relativePath
+                                }
+                            } else {
+                                if (item.isVideo) {
+                                    viewModel.playVideo(item)
+                                } else {
+                                    viewModel.viewPhoto(item)
+                                }
                             }
                         },
                         onDownload = { viewModel.downloadMedia(item) },
@@ -242,11 +375,100 @@ fun GalleryScreen(viewModel: CameraViewModel) {
                             if (localPath != null) {
                                 openLocalFile(context, File(localPath), item.isVideo)
                             }
+                        },
+                        onDelete = {
+                            itemPendingDelete = item
                         }
                     )
                 }
             }
         }
+    }
+
+    // Cuadro de diálogo de confirmación para eliminar archivo individual
+    itemPendingDelete?.let { item ->
+        AlertDialog(
+            onDismissRequest = { itemPendingDelete = null },
+            icon = { Icon(Icons.Default.DeleteForever, contentDescription = null, tint = Color(0xFFFF5252)) },
+            title = { Text("¿Eliminar archivo?") },
+            text = {
+                Text(
+                    "¿Estás seguro de que deseas eliminar permanentemente \"${item.name}\" (${item.formattedSize}) de la tarjeta MicroSD de la cámara y del teléfono?",
+                    fontSize = 13.sp,
+                    color = Color.LightGray
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val toDelete = item
+                        itemPendingDelete = null
+                        coroutineScope.launch {
+                            isDeleting = true
+                            deleteStatusMessage = "Eliminando ${toDelete.name}..."
+                            val ok = viewModel.deleteMediaItem(toDelete)
+                            isDeleting = false
+                            deleteStatusMessage = if (ok) "Archivo eliminado." else "Aviso: Error eliminando archivo de la MicroSD."
+                            kotlinx.coroutines.delay(2500)
+                            deleteStatusMessage = null
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF5252))
+                ) {
+                    Text("Eliminar", color = Color.White)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { itemPendingDelete = null }) {
+                    Text("Cancelar")
+                }
+            }
+        )
+    }
+
+    // Cuadro de diálogo de confirmación para eliminación múltiple
+    if (showBatchDeleteConfirm) {
+        val selectedItemsList = remember(selectedRelPaths, filteredItems) {
+            filteredItems.filter { it.relativePath in selectedRelPaths }
+        }
+        AlertDialog(
+            onDismissRequest = { showBatchDeleteConfirm = false },
+            icon = { Icon(Icons.Default.DeleteForever, contentDescription = null, tint = Color(0xFFFF5252)) },
+            title = { Text("¿Eliminar ${selectedItemsList.size} archivos?") },
+            text = {
+                Text(
+                    "Esta acción borrará definitivamente los ${selectedItemsList.size} archivos seleccionados de la tarjeta MicroSD de la cámara y del almacenamiento local del teléfono.",
+                    fontSize = 13.sp,
+                    color = Color.LightGray
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showBatchDeleteConfirm = false
+                        coroutineScope.launch {
+                            isDeleting = true
+                            deleteStatusMessage = "Eliminando ${selectedItemsList.size} archivos..."
+                            val (okCount, failCount) = viewModel.deleteMultipleMediaItems(selectedItemsList)
+                            isDeleting = false
+                            isSelectionMode = false
+                            selectedRelPaths = emptySet()
+                            deleteStatusMessage = "Se eliminaron $okCount archivos" + if (failCount > 0) " ($failCount con error)" else "."
+                            kotlinx.coroutines.delay(3000)
+                            deleteStatusMessage = null
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF5252))
+                ) {
+                    Text("Eliminar (${selectedItemsList.size})", color = Color.White)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showBatchDeleteConfirm = false }) {
+                    Text("Cancelar")
+                }
+            }
+        )
     }
 
     // Modal de Reproducción de Video
@@ -280,21 +502,41 @@ fun MediaItemCard(
     item: CameraMediaItem,
     isDownloaded: Boolean,
     downloadProgress: Float?,
+    isSelectionMode: Boolean = false,
+    isSelected: Boolean = false,
+    onToggleSelect: () -> Unit = {},
     onPlayOrView: () -> Unit,
     onDownload: () -> Unit,
-    onOpenLocal: () -> Unit
+    onOpenLocal: () -> Unit,
+    onDelete: () -> Unit
 ) {
     Surface(
-        color = Color(0xFF1E1E1E),
+        color = if (isSelected) Color(0xFF1E3545) else Color(0xFF1E1E1E),
         shape = RoundedCornerShape(10.dp),
-        modifier = Modifier.fillMaxWidth()
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable {
+                if (isSelectionMode) onToggleSelect() else onPlayOrView()
+            }
     ) {
         Column(modifier = Modifier.padding(12.dp)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
+                // Checkbox de selección si estamos en modo selección
+                if (isSelectionMode) {
+                    Checkbox(
+                        checked = isSelected,
+                        onCheckedChange = { onToggleSelect() },
+                        colors = CheckboxDefaults.colors(
+                            checkedColor = Color(0xFF00E5FF),
+                            checkmarkColor = Color.Black
+                        )
+                    )
+                }
+
                 // Ícono del tipo de archivo
                 Box(
                     modifier = Modifier
@@ -341,40 +583,50 @@ fun MediaItemCard(
                     }
                 }
 
-                // Botones de acción
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    // Botón Reproducir / Ver
-                    IconButton(
-                        onClick = onPlayOrView,
-                        colors = IconButtonDefaults.iconButtonColors(contentColor = Color(0xFF00E5FF))
-                    ) {
-                        Icon(
-                            if (item.isVideo) Icons.Default.PlayCircle else Icons.Default.Visibility,
-                            contentDescription = if (item.isVideo) "Reproducir" else "Ver Foto"
-                        )
-                    }
-
-                    // Botón Descargar / Abrir
-                    if (isDownloaded) {
+                // Botones de acción (visibles cuando no estamos seleccionando)
+                if (!isSelectionMode) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        // Botón Reproducir / Ver
                         IconButton(
-                            onClick = onOpenLocal,
-                            colors = IconButtonDefaults.iconButtonColors(contentColor = Color(0xFF00E676))
+                            onClick = onPlayOrView,
+                            colors = IconButtonDefaults.iconButtonColors(contentColor = Color(0xFF00E5FF))
                         ) {
-                            Icon(Icons.Default.CheckCircle, contentDescription = "Descargado (Abrir)")
+                            Icon(
+                                if (item.isVideo) Icons.Default.PlayCircle else Icons.Default.Visibility,
+                                contentDescription = if (item.isVideo) "Reproducir" else "Ver Foto"
+                            )
                         }
-                    } else if (downloadProgress != null && downloadProgress in 0f..0.99f) {
-                        CircularProgressIndicator(
-                            progress = { downloadProgress },
-                            modifier = Modifier.size(24.dp),
-                            strokeWidth = 2.5.dp,
-                            color = Color(0xFF00E5FF)
-                        )
-                    } else {
+
+                        // Botón Descargar / Abrir
+                        if (isDownloaded) {
+                            IconButton(
+                                onClick = onOpenLocal,
+                                colors = IconButtonDefaults.iconButtonColors(contentColor = Color(0xFF00E676))
+                            ) {
+                                Icon(Icons.Default.CheckCircle, contentDescription = "Descargado (Abrir)")
+                            }
+                        } else if (downloadProgress != null && downloadProgress in 0f..0.99f) {
+                            CircularProgressIndicator(
+                                progress = { downloadProgress },
+                                modifier = Modifier.size(24.dp),
+                                strokeWidth = 2.5.dp,
+                                color = Color(0xFF00E5FF)
+                            )
+                        } else {
+                            IconButton(
+                                onClick = onDownload,
+                                colors = IconButtonDefaults.iconButtonColors(contentColor = Color.LightGray)
+                            ) {
+                                Icon(Icons.Default.Download, contentDescription = "Descargar al teléfono")
+                            }
+                        }
+
+                        // Botón Eliminar
                         IconButton(
-                            onClick = onDownload,
-                            colors = IconButtonDefaults.iconButtonColors(contentColor = Color.LightGray)
+                            onClick = onDelete,
+                            colors = IconButtonDefaults.iconButtonColors(contentColor = Color(0xFFFF5252))
                         ) {
-                            Icon(Icons.Default.Download, contentDescription = "Descargar al teléfono")
+                            Icon(Icons.Default.DeleteOutline, contentDescription = "Eliminar archivo")
                         }
                     }
                 }
@@ -412,6 +664,8 @@ fun VideoPlayerModal(
     var isDragging by remember { mutableStateOf(false) }
     var dragPosition by remember { mutableStateOf(0f) }
     var showControls by remember { mutableStateOf(true) }
+    var showDeleteConfirm by remember { mutableStateOf(false) }
+    val coroutineScope = rememberCoroutineScope()
 
     val videoPlayUrl = remember(item, isDownloaded, localPath) {
         if (isDownloaded && localPath != null) {
@@ -497,6 +751,14 @@ fun VideoPlayerModal(
                                 }
                             }
 
+                            // Botón Eliminar Video
+                            IconButton(
+                                onClick = { showDeleteConfirm = true },
+                                colors = IconButtonDefaults.iconButtonColors(contentColor = Color(0xFFFF5252))
+                            ) {
+                                Icon(Icons.Default.Delete, contentDescription = "Eliminar Video")
+                            }
+
                             IconButton(
                                 onClick = onDismiss,
                                 colors = IconButtonDefaults.iconButtonColors(contentColor = Color.White)
@@ -504,6 +766,34 @@ fun VideoPlayerModal(
                                 Icon(Icons.Default.Close, contentDescription = "Cerrar")
                             }
                         }
+                    }
+
+                    if (showDeleteConfirm) {
+                        AlertDialog(
+                            onDismissRequest = { showDeleteConfirm = false },
+                            icon = { Icon(Icons.Default.DeleteForever, contentDescription = null, tint = Color(0xFFFF5252)) },
+                            title = { Text("¿Eliminar video?") },
+                            text = { Text("¿Deseas eliminar permanentemente \"${item.name}\" (${item.formattedSize}) de la cámara?") },
+                            confirmButton = {
+                                Button(
+                                    onClick = {
+                                        showDeleteConfirm = false
+                                        coroutineScope.launch {
+                                            viewModel.deleteMediaItem(item)
+                                            onDismiss()
+                                        }
+                                    },
+                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF5252))
+                                ) {
+                                    Text("Eliminar", color = Color.White)
+                                }
+                            },
+                            dismissButton = {
+                                TextButton(onClick = { showDeleteConfirm = false }) {
+                                    Text("Cancelar")
+                                }
+                            }
+                        )
                     }
 
                     // Botón central flotante de Play/Pausa rápido
@@ -744,6 +1034,46 @@ fun PhotoViewerModal(
                         ) {
                             Icon(Icons.Default.Download, contentDescription = "Descargar Foto")
                         }
+                    }
+
+                    // Botón Eliminar Foto
+                    var showDeleteConfirm by remember { mutableStateOf(false) }
+                    IconButton(
+                        onClick = { showDeleteConfirm = true },
+                        colors = IconButtonDefaults.iconButtonColors(contentColor = Color(0xFFFF5252))
+                    ) {
+                        Icon(Icons.Default.Delete, contentDescription = "Eliminar Foto")
+                    }
+
+                    if (showDeleteConfirm) {
+                        AlertDialog(
+                            onDismissRequest = { showDeleteConfirm = false },
+                            icon = { Icon(Icons.Default.DeleteForever, contentDescription = null, tint = Color(0xFFFF5252)) },
+                            title = { Text("¿Eliminar foto?") },
+                            text = { Text("¿Deseas eliminar permanentemente \"${currentPhoto.name}\" (${currentPhoto.formattedSize}) de la cámara?") },
+                            confirmButton = {
+                                Button(
+                                    onClick = {
+                                        showDeleteConfirm = false
+                                        val toDel = currentPhoto
+                                        coroutineScope.launch {
+                                            viewModel.deleteMediaItem(toDel)
+                                            if (photos.size <= 1) {
+                                                onDismiss()
+                                            }
+                                        }
+                                    },
+                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF5252))
+                                ) {
+                                    Text("Eliminar", color = Color.White)
+                                }
+                            },
+                            dismissButton = {
+                                TextButton(onClick = { showDeleteConfirm = false }) {
+                                    Text("Cancelar")
+                                }
+                            }
+                        )
                     }
 
                     IconButton(

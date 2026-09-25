@@ -34,6 +34,10 @@ fun LiveControlScreen(viewModel: CameraViewModel) {
     val isStreamPlaying by viewModel.playerManager.isPlaying.collectAsState()
     val streamError by viewModel.playerManager.errorMessage.collectAsState()
 
+    val isPhoneRecording by viewModel.isPhoneRecording.collectAsState()
+    val phoneRecordingSeconds by viewModel.phoneRecordingSeconds.collectAsState()
+    val phoneRecordMessage by viewModel.phoneRecordMessage.collectAsState()
+
     val context = androidx.compose.ui.platform.LocalContext.current
     DisposableEffect(isStreamPlaying) {
         val window = (context as? android.app.Activity)?.window
@@ -42,6 +46,13 @@ fun LiveControlScreen(viewModel: CameraViewModel) {
         }
         onDispose {
             window?.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+    }
+
+    LaunchedEffect(phoneRecordMessage) {
+        if (phoneRecordMessage != null) {
+            kotlinx.coroutines.delay(4500)
+            viewModel.clearPhoneRecordMessage()
         }
     }
 
@@ -188,7 +199,7 @@ fun LiveControlScreen(viewModel: CameraViewModel) {
                 }
             }
 
-            // Indicador de Grabando en esquina
+            // Indicador de Grabando en MicroSD (esquina superior izquierda)
             if (status.isRecording) {
                 Row(
                     modifier = Modifier
@@ -207,7 +218,31 @@ fun LiveControlScreen(viewModel: CameraViewModel) {
                     val minutes = recordingSeconds / 60
                     val seconds = recordingSeconds % 60
                     val timeText = String.format(java.util.Locale.US, "%02d:%02d", minutes, seconds)
-                    Text("REC $timeText", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    Text("SD REC $timeText", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                }
+            }
+
+            // Indicador de Grabando en Celular (esquina superior derecha)
+            if (isPhoneRecording) {
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(12.dp)
+                        .background(Color(0xD9001A24), RoundedCornerShape(6.dp))
+                        .border(1.dp, Color(0xFF00E5FF), RoundedCornerShape(6.dp))
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(10.dp)
+                            .background(Color(0xFF00E5FF), CircleShape)
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    val minP = phoneRecordingSeconds / 60
+                    val secP = phoneRecordingSeconds % 60
+                    val timeP = String.format(java.util.Locale.US, "%02d:%02d", minP, secP)
+                    Text("📱 CELULAR $timeP", color = Color(0xFF80D8FF), fontWeight = FontWeight.Bold, fontSize = 12.sp)
                 }
             }
 
@@ -240,52 +275,127 @@ fun LiveControlScreen(viewModel: CameraViewModel) {
             }
         }
 
-        Spacer(Modifier.height(16.dp))
+        Spacer(Modifier.height(12.dp))
+
+        // Banner de notificación de grabación en celular
+        if (phoneRecordMessage != null) {
+            Surface(
+                color = Color(0xFF003747),
+                shape = RoundedCornerShape(8.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 8.dp)
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = phoneRecordMessage ?: "",
+                        color = Color(0xFF80D8FF),
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier.weight(1f)
+                    )
+                    IconButton(
+                        onClick = { viewModel.clearPhoneRecordMessage() },
+                        modifier = Modifier.size(24.dp)
+                    ) {
+                        Icon(Icons.Default.Close, contentDescription = "Cerrar", tint = Color.LightGray, modifier = Modifier.size(16.dp))
+                    }
+                }
+            }
+        }
 
         // Controles de Acción (Botones principales)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(bottom = 12.dp),
+                .padding(bottom = 8.dp),
             horizontalArrangement = Arrangement.SpaceEvenly,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Botón Verificar Conexión
-            IconButton(
-                onClick = { viewModel.checkConnectionAndBattery() },
-                modifier = Modifier
-                    .size(52.dp)
-                    .background(Color(0xFF2C2C2C), CircleShape)
-            ) {
-                Icon(Icons.Default.Refresh, contentDescription = "Refrescar", tint = Color.White)
+            // 1. Refrescar / Estado
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                IconButton(
+                    onClick = { viewModel.checkConnectionAndBattery() },
+                    modifier = Modifier
+                        .size(48.dp)
+                        .background(Color(0xFF2C2C2C), CircleShape)
+                ) {
+                    Icon(Icons.Default.Refresh, contentDescription = "Refrescar", tint = Color.White)
+                }
+                Spacer(Modifier.height(4.dp))
+                Text("Estado", color = Color.Gray, fontSize = 11.sp)
             }
 
-            // Botón Grabar Video (Principal)
-            Button(
-                onClick = { viewModel.toggleRecording() },
-                modifier = Modifier.size(72.dp),
-                shape = CircleShape,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = if (status.isRecording) Color.Red else Color(0xFFFF5252)
-                ),
-                contentPadding = PaddingValues(0.dp)
-            ) {
-                Icon(
-                    imageVector = if (status.isRecording) Icons.Default.Stop else Icons.Default.Videocam,
-                    contentDescription = "Grabar",
-                    tint = Color.White,
-                    modifier = Modifier.size(36.dp)
+            // 2. Grabar en MicroSD (Cámara)
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Button(
+                    onClick = { viewModel.toggleRecording() },
+                    modifier = Modifier.size(62.dp),
+                    shape = CircleShape,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (status.isRecording) Color.Red else Color(0xFFFF5252)
+                    ),
+                    contentPadding = PaddingValues(0.dp)
+                ) {
+                    Icon(
+                        imageVector = if (status.isRecording) Icons.Default.Stop else Icons.Default.Videocam,
+                        contentDescription = "Grabar SD",
+                        tint = Color.White,
+                        modifier = Modifier.size(32.dp)
+                    )
+                }
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = if (status.isRecording) "Detener SD" else "MicroSD",
+                    color = if (status.isRecording) Color.Red else Color.LightGray,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Medium
                 )
             }
 
-            // Botón Tomar Foto
-            IconButton(
-                onClick = { viewModel.takePhoto() },
-                modifier = Modifier
-                    .size(52.dp)
-                    .background(Color.White, CircleShape)
-            ) {
-                Icon(Icons.Default.CameraAlt, contentDescription = "Foto", tint = Color.Black)
+            // 3. Grabar Directo en Celular (NUEVO)
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Button(
+                    onClick = { viewModel.togglePhoneRecording() },
+                    modifier = Modifier.size(62.dp),
+                    shape = CircleShape,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (isPhoneRecording) Color(0xFFFF9100) else Color(0xFF00E5FF)
+                    ),
+                    contentPadding = PaddingValues(0.dp)
+                ) {
+                    Icon(
+                        imageVector = if (isPhoneRecording) Icons.Default.Stop else Icons.Default.PhoneAndroid,
+                        contentDescription = "Grabar en Teléfono",
+                        tint = Color.Black,
+                        modifier = Modifier.size(32.dp)
+                    )
+                }
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = if (isPhoneRecording) "Detener Cel" else "Al Celular",
+                    color = if (isPhoneRecording) Color(0xFFFF9100) else Color(0xFF00E5FF),
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Medium
+                )
+            }
+
+            // 4. Tomar Foto
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                IconButton(
+                    onClick = { viewModel.takePhoto() },
+                    modifier = Modifier
+                        .size(48.dp)
+                        .background(Color.White, CircleShape)
+                ) {
+                    Icon(Icons.Default.CameraAlt, contentDescription = "Foto", tint = Color.Black)
+                }
+                Spacer(Modifier.height(4.dp))
+                Text("Foto", color = Color.Gray, fontSize = 11.sp)
             }
         }
     }

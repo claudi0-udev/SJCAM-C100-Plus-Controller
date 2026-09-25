@@ -152,7 +152,7 @@ class MediaDownloadManager(
         }
     }
 
-    private fun saveToPublicGallery(file: File, isVideo: Boolean) {
+    fun saveToPublicGallery(file: File, isVideo: Boolean): android.net.Uri? {
         try {
             val resolver = context.contentResolver
             val contentValues = ContentValues().apply {
@@ -191,9 +191,29 @@ class MediaDownloadManager(
                     resolver.update(uri, contentValues, null, null)
                 }
                 AppLogger.i(TAG, "Copia registrada en MediaStore público: $uri")
+                return uri
             }
         } catch (e: Exception) {
             AppLogger.w(TAG, "Aviso registrando en MediaStore: ${e.message}")
         }
+        return null
+    }
+
+    fun deleteLocalFile(item: CameraMediaItem) {
+        val map = _downloadedFiles.value.toMutableMap()
+        val localPath = map[item.name] ?: map[item.relativePath]
+        if (localPath != null) {
+            try {
+                val f = File(localPath)
+                if (f.exists()) {
+                    f.delete()
+                    AppLogger.i(TAG, "Archivo local borrado: $localPath")
+                }
+            } catch (e: Exception) {
+                AppLogger.w(TAG, "Error borrando archivo local $localPath: ${e.message}")
+            }
+        }
+        _downloadedFiles.update { it - item.name - item.relativePath }
+        _downloadProgress.update { it - item.relativePath }
     }
 }

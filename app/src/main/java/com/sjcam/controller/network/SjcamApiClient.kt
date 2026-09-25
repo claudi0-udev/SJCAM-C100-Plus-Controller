@@ -106,6 +106,65 @@ class SjcamApiClient(var cameraBaseUrl: String = "http://192.168.1.254") {
 
     suspend fun listMedia(): Result<NovatekResponse> = executeCommand(3015)
 
+    /**
+     * Elimina un archivo en la tarjeta MicroSD de la cámara (cmd=4003).
+     * Prueba los distintos formatos de ruta esperados por el firmware Novatek:
+     * str=A:\Movie\xxx, par=A:\Movie\xxx, o rutas directas.
+     */
+    suspend fun deleteFile(rawPath: String, relPath: String? = null): Result<NovatekResponse> =
+        withContext(Dispatchers.IO) {
+            val candidatePaths = LinkedHashSet<String>()
+            if (rawPath.isNotBlank()) {
+                candidatePaths.add(rawPath)
+                candidatePaths.add(rawPath.replace('/', '\\'))
+                candidatePaths.add(rawPath.replace('\\', '/'))
+            }
+            if (!relPath.isNullOrBlank()) {
+                val clean = if (relPath.startsWith("/")) relPath else "/$relPath"
+                candidatePaths.add(clean)
+                candidatePaths.add("A:$clean".replace('/', '\\'))
+                candidatePaths.add(clean.trimStart('/'))
+            }
+
+            var lastResult: Result<NovatekResponse>? = null
+
+            for (path in candidatePaths) {
+                try {
+                    val encoded = java.net.URLEncoder.encode(path, "UTF-8")
+                    // Probar variante con str= (estándar Novatek NT966xx)
+                    val urlStr = "$cameraBaseUrl/?custom=1&cmd=4003&str=$encoded"
+                    val reqStr = Request.Builder().url(urlStr).get().build()
+                    client.newCall(reqStr).execute().use { resp ->
+                        val body = resp.body?.string() ?: ""
+                        val parsed = NovatekResponse.parse(body)
+                        if (parsed.isSuccess) {
+                            AppLogger.i(TAG, "¡Archivo eliminado exitosamente con cmd=4003&str=$path!")
+                            return@withContext Result.success(parsed)
+                        }
+                        lastResult = Result.success(parsed)
+                    }
+
+                    // Probar variante con par=
+                    val urlPar = "$cameraBaseUrl/?custom=1&cmd=4003&par=$encoded"
+                    val reqPar = Request.Builder().url(urlPar).get().build()
+                    client.newCall(reqPar).execute().use { resp ->
+                        val body = resp.body?.string() ?: ""
+                        val parsed = NovatekResponse.parse(body)
+                        if (parsed.isSuccess) {
+                            AppLogger.i(TAG, "¡Archivo eliminado exitosamente con cmd=4003&par=$path!")
+                            return@withContext Result.success(parsed)
+                        }
+                        lastResult = Result.success(parsed)
+                    }
+                } catch (e: Exception) {
+                    AppLogger.w(TAG, "Excepción intentando borrar $path: ${e.message}")
+                    lastResult = Result.failure(e)
+                }
+            }
+
+            lastResult ?: Result.failure(Exception("No se pudo contactar a la cámara para eliminar el archivo."))
+        }
+
     suspend fun executeRawUrl(pathAndQuery: String): Result<String> =
         withContext(Dispatchers.IO) {
             val normalizedPath = if (pathAndQuery.startsWith("/")) pathAndQuery else "/$pathAndQuery"

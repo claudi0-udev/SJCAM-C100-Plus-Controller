@@ -11,6 +11,7 @@ import com.sjcam.controller.data.MediaFilter
 import com.sjcam.controller.network.CameraNetworkManager
 import com.sjcam.controller.network.SjcamApiClient
 import com.sjcam.controller.player.VlcPlayerManager
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -19,6 +20,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class CameraViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -39,6 +41,15 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     private val _rawCommandResult = MutableStateFlow<String>("")
     val rawCommandResult: StateFlow<String> = _rawCommandResult.asStateFlow()
 
+    // === GRABACIÓN DIRECTA AL CELULAR (MODO BOLSILLO / SIN MICROSD) ===
+    private var wakeLock: android.os.PowerManager.WakeLock? = null
+    val isPhoneRecording = playerManager.isPhoneRecording
+    private val _phoneRecordingSeconds = MutableStateFlow(0)
+    val phoneRecordingSeconds: StateFlow<Int> = _phoneRecordingSeconds.asStateFlow()
+    private val _phoneRecordMessage = MutableStateFlow<String?>(null)
+    val phoneRecordMessage: StateFlow<String?> = _phoneRecordMessage.asStateFlow()
+    private var phoneRecordTimerJob: Job? = null
+
     init {
         AppLogger.i(TAG, "CameraViewModel inicializado.")
         networkManager.bindProcessToWifiNetwork()
@@ -46,6 +57,23 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         startHeartbeat()
         // Buscar actualizaciones silenciosamente al inicio
         checkForAppUpdates()
+
+        // Callback cuando LibVLC finaliza la escritura de un clip local en disco
+        playerManager.onRecordFinished = { recordedFile ->
+            viewModelScope.launch {
+                AppLogger.i(TAG, "Clip en celular finalizado: ${recordedFile.absolutePath} (${recordedFile.length()} bytes)")
+                val uri = downloadManager.saveToPublicGallery(recordedFile, isVideo = true)
+                android.media.MediaScannerConnection.scanFile(
+                    getApplication(),
+                    arrayOf(recordedFile.absolutePath),
+                    arrayOf("video/mp4"),
+                    null
+                )
+                _phoneRecordMessage.value = "¡Video guardado en el teléfono! (${recordedFile.name})"
+                downloadManager.checkExistingDownloads()
+                releaseWakeLock()
+            }
+        }
     }
 
     fun checkForAppUpdates() {
@@ -126,6 +154,135 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     fun closeMediaViewer() {
         _selectedMediaToPlay.value = null
         _selectedPhotoToView.value = null
+    }
+
+    // === GESTIÓN DE BORRADO DE ARCHIVOS MICROSD / LOCAL ===
+    suspend fun deleteMediaItem(item: com.sjcam.controller.data.CameraMediaItem): Boolean {
+        return withContext(Dispatchers.IO) {
+            AppLogger.i(TAG, "Eliminando archivo: ${item.name} (raw: ${item.rawNovatekPath}, rel: ${item.relativePath})")
+            val targetPath = item.rawNovatekPath.ifBlank { item.relativePath }
+            val result = apiClient.deleteFile(targetPath, item.relativePath)
+
+            // Borrar copia local si fue descargada
+            downloadManager.deleteLocalFile(item)
+
+            // Actualizar lista en pantalla quitando el elemento
+            _mediaItems.update { current ->
+                current.filter { it.relativePath != item.relativePath && it.name != item.name }
+            }
+
+            // Si el visor modal estaba mostrando este archivo, cerrarlo
+            if (_selectedMediaToPlay.value?.relativePath == item.relativePath) {
+                _selectedMediaToPlay.value = null
+            }
+            if (_selectedPhotoToView.value?.relativePath == item.relativePath) {
+                _selectedPhotoToView.value = null
+            }
+
+            val isOk = result.isSuccess && (result.getOrNull()?.isSuccess == true)
+            if (isOk) {
+                AppLogger.i(TAG, "¡Archivo ${item.name} eliminado exitosamente de la MicroSD!")
+            } else {
+                AppLogger.w(TAG, "Aviso de cámara al intentar borrar ${item.name}: ${result.getOrNull()?.rawXml}")
+            }
+            isOk
+        }
+    }
+
+    suspend fun deleteMultipleMediaItems(items: List<com.sjcam.controller.data.CameraMediaItem>): Pair<Int, Int> {
+        return withContext(Dispatchers.IO) {
+            var successCount = 0
+            var failCount = 0
+            for (item in items) {
+                val ok = deleteMediaItem(item)
+                if (ok) successCount++ else failCount++
+                delay(120) // Pequeña pausa para no saturar el servidor HTTP embebido del DSP Novatek
+            }
+            AppLogger.i(TAG, "Eliminación por selección completada: $successCount exitosos, $failCount fallidos.")
+            Pair(successCount, failCount)
+        }
+    }
+
+    // === MÉTODOS DE GRABACIÓN DIRECTA AL CELULAR ===
+    private fun acquireWakeLock() {
+        try {
+            if (wakeLock == null) {
+                val powerManager = getApplication<Application>().getSystemService(android.content.Context.POWER_SERVICE) as android.os.PowerManager
+                wakeLock = powerManager.newWakeLock(
+                    android.os.PowerManager.PARTIAL_WAKE_LOCK,
+                    "com.sjcam.controller:PhoneRecordingWakeLock"
+                ).apply {
+                    setReferenceCounted(false)
+                }
+            }
+            if (wakeLock?.isHeld == false) {
+                wakeLock?.acquire(45 * 60 * 1000L /* 45 minutos máx de seguridad */)
+                AppLogger.i(TAG, "WakeLock adquirido: Grabación continuará en el bolsillo con pantalla apagada.")
+            }
+        } catch (e: Exception) {
+            AppLogger.w(TAG, "Aviso WakeLock: ${e.message}")
+        }
+    }
+
+    private fun releaseWakeLock() {
+        try {
+            if (wakeLock?.isHeld == true) {
+                wakeLock?.release()
+                AppLogger.i(TAG, "WakeLock liberado.")
+            }
+        } catch (e: Exception) {
+            AppLogger.w(TAG, "Error liberando WakeLock: ${e.message}")
+        }
+    }
+
+    fun togglePhoneRecording() {
+        viewModelScope.launch {
+            if (playerManager.isPhoneRecording.value) {
+                AppLogger.i(TAG, "Deteniendo grabación directa en el celular...")
+                playerManager.stopPhoneRecording()
+                phoneRecordTimerJob?.cancel()
+                phoneRecordTimerJob = null
+                releaseWakeLock()
+            } else {
+                AppLogger.i(TAG, "Iniciando grabación directa en el celular...")
+                // Asegurar que el stream RTSP esté activo
+                if (!_cameraStatus.value.isLiveStreaming || !playerManager.isPlaying.value) {
+                    apiClient.setCameraMode(CameraMode.VIDEO)
+                    delay(200)
+                    apiClient.enableLiveStream()
+                    delay(300)
+                    _cameraStatus.update { it.copy(isLiveStreaming = true) }
+                    val currentStatus = _cameraStatus.value
+                    playerManager.startStream(currentStatus.rtspUrl, currentStatus.forceTcp)
+                    delay(600)
+                }
+
+                val moviesDir = java.io.File(
+                    getApplication<Application>().getExternalFilesDir(android.os.Environment.DIRECTORY_MOVIES),
+                    "SJCAM_Local"
+                ).apply { mkdirs() }
+
+                val started = playerManager.startPhoneRecording(moviesDir)
+                if (started) {
+                    acquireWakeLock()
+                    _phoneRecordingSeconds.value = 0
+                    phoneRecordTimerJob?.cancel()
+                    phoneRecordTimerJob = viewModelScope.launch {
+                        while (isActive && playerManager.isPhoneRecording.value) {
+                            delay(1000)
+                            _phoneRecordingSeconds.value++
+                        }
+                    }
+                    _phoneRecordMessage.value = "Grabando directo en el teléfono (Movies/SJCAM)..."
+                } else {
+                    _phoneRecordMessage.value = "Error: no se pudo iniciar la grabación en el teléfono"
+                }
+            }
+        }
+    }
+
+    fun clearPhoneRecordMessage() {
+        _phoneRecordMessage.value = null
     }
 
     fun updateCameraIp(ip: String) {
@@ -675,6 +832,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     override fun onCleared() {
         super.onCleared()
         stopHeartbeat()
+        releaseWakeLock()
         playerManager.release()
         networkManager.releaseNetworkBinding()
     }
