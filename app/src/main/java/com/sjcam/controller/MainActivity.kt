@@ -12,15 +12,18 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.CameraAlt
+import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
 import com.sjcam.controller.data.AppLogger
 import com.sjcam.controller.ui.CommandTesterScreen
+import com.sjcam.controller.ui.GalleryScreen
 import com.sjcam.controller.ui.LiveControlScreen
 import com.sjcam.controller.ui.LogViewerScreen
 import com.sjcam.controller.ui.SettingsScreen
@@ -77,9 +80,10 @@ class MainActivity : ComponentActivity() {
 
 enum class AppTab(val label: String) {
     CAMERA("Cámara"),
+    GALLERY("Galería"),
     SETTINGS("Ajustes"),
     COMMANDS("Comandos"),
-    LOGS("Logs / Debug")
+    LOGS("Logs")
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -97,6 +101,20 @@ fun MainAppScaffold(viewModel: CameraViewModel) {
                     onClick = { selectedTab = AppTab.CAMERA },
                     icon = { Icon(Icons.Default.CameraAlt, contentDescription = "Cámara") },
                     label = { Text(AppTab.CAMERA.label) },
+                    colors = NavigationBarItemDefaults.colors(
+                        selectedIconColor = Color(0xFF00E5FF),
+                        selectedTextColor = Color(0xFF00E5FF),
+                        indicatorColor = Color(0xFF2C2C2C),
+                        unselectedIconColor = Color.Gray,
+                        unselectedTextColor = Color.Gray
+                    )
+                )
+
+                NavigationBarItem(
+                    selected = selectedTab == AppTab.GALLERY,
+                    onClick = { selectedTab = AppTab.GALLERY },
+                    icon = { Icon(Icons.Default.PhotoLibrary, contentDescription = "Galería") },
+                    label = { Text(AppTab.GALLERY.label) },
                     colors = NavigationBarItemDefaults.colors(
                         selectedIconColor = Color(0xFF00E5FF),
                         selectedTextColor = Color(0xFF00E5FF),
@@ -153,6 +171,7 @@ fun MainAppScaffold(viewModel: CameraViewModel) {
         Box(modifier = Modifier.padding(paddingValues)) {
             when (selectedTab) {
                 AppTab.CAMERA -> LiveControlScreen(viewModel)
+                AppTab.GALLERY -> GalleryScreen(viewModel)
                 AppTab.SETTINGS -> SettingsScreen(viewModel)
                 AppTab.COMMANDS -> CommandTesterScreen(viewModel)
                 AppTab.LOGS -> LogViewerScreen()

@@ -67,6 +67,98 @@ class CameraNetworkManager(private val context: Context) {
         }
     }
 
+    private var specificNetworkCallback: ConnectivityManager.NetworkCallback? = null
+
+    /**
+     * Conexión directa a la red Wi-Fi de la cámara desde dentro de la app
+     * mediante WifiNetworkSpecifier (Android 10+).
+     */
+    fun connectDirectToWifi(ssid: String, passphrase: String, onStatus: (String) -> Unit) {
+        val cleanSsid = ssid.trim()
+        val cleanPass = passphrase.trim()
+        AppLogger.i(TAG, "Iniciando solicitud in-app para conectar a Wi-Fi: $cleanSsid...")
+        onStatus("Solicitando conexión a $cleanSsid...")
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            try {
+                val specifier = if (cleanPass.isNotBlank()) {
+                    android.net.wifi.WifiNetworkSpecifier.Builder()
+                        .setSsid(cleanSsid)
+                        .setWpa2Passphrase(cleanPass)
+                        .build()
+                } else {
+                    android.net.wifi.WifiNetworkSpecifier.Builder()
+                        .setSsid(cleanSsid)
+                        .build()
+                }
+
+                val request = NetworkRequest.Builder()
+                    .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                    .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                    .setNetworkSpecifier(specifier)
+                    .build()
+
+                specificNetworkCallback?.let {
+                    try { connectivityManager.unregisterNetworkCallback(it) } catch (_: Exception) {}
+                }
+
+                specificNetworkCallback = object : ConnectivityManager.NetworkCallback() {
+                    override fun onAvailable(network: Network) {
+                        val bound = connectivityManager.bindProcessToNetwork(network)
+                        _isBoundToWifi.value = bound
+                        _currentWifiSsid.value = cleanSsid
+                        AppLogger.i(TAG, "¡Conectado in-app a Wi-Fi $cleanSsid! bindProcessToNetwork=$bound")
+                        onStatus("¡Conectado a $cleanSsid!")
+                    }
+
+                    override fun onUnavailable() {
+                        AppLogger.w(TAG, "Conexión a $cleanSsid cancelada o red no encontrada.")
+                        onStatus("Conexión cancelada o red no disponible.")
+                    }
+
+                    override fun onLost(network: Network) {
+                        AppLogger.w(TAG, "Conexión con $cleanSsid perdida.")
+                        _isBoundToWifi.value = false
+                        onStatus("Conexión perdida.")
+                    }
+                }
+
+                connectivityManager.requestNetwork(request, specificNetworkCallback!!)
+                onStatus("Confirma la conexión a $cleanSsid en el aviso en pantalla...")
+            } catch (e: Exception) {
+                AppLogger.e(TAG, "Error en connectDirectToWifi: ${e.message}", e)
+                onStatus("Error: ${e.message}")
+            }
+        } else {
+            onStatus("Android 9 o anterior: Usa el panel Wi-Fi para conectarte a $cleanSsid.")
+            openSystemWifiSettings()
+        }
+    }
+
+    /**
+     * Abre el panel flotante de Wi-Fi de Android sobre la app sin salir a Ajustes.
+     */
+    fun openSystemWifiSettings() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val panelIntent = android.content.Intent(android.provider.Settings.Panel.ACTION_WIFI).apply {
+                    addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(panelIntent)
+            } else {
+                val wifiIntent = android.content.Intent(android.provider.Settings.ACTION_WIFI_SETTINGS).apply {
+                    addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(wifiIntent)
+            }
+        } catch (e: Exception) {
+            val fallback = android.content.Intent(android.provider.Settings.ACTION_WIFI_SETTINGS).apply {
+                addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(fallback)
+        }
+    }
+
     /**
      * Libera el binding de red y vuelve a la configuración por defecto de Android.
      */
@@ -76,6 +168,10 @@ class CameraNetworkManager(private val context: Context) {
             networkCallback?.let {
                 connectivityManager.unregisterNetworkCallback(it)
                 networkCallback = null
+            }
+            specificNetworkCallback?.let {
+                connectivityManager.unregisterNetworkCallback(it)
+                specificNetworkCallback = null
             }
             _isBoundToWifi.value = false
             AppLogger.i(TAG, "Binding de red Wi-Fi liberado.")

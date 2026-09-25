@@ -4,8 +4,10 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.sjcam.controller.data.AppLogger
+import com.sjcam.controller.data.CameraMediaItem
 import com.sjcam.controller.data.CameraMode
 import com.sjcam.controller.data.CameraStatus
+import com.sjcam.controller.data.MediaFilter
 import com.sjcam.controller.network.CameraNetworkManager
 import com.sjcam.controller.network.SjcamApiClient
 import com.sjcam.controller.player.VlcPlayerManager
@@ -40,6 +42,8 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     init {
         AppLogger.i(TAG, "CameraViewModel inicializado.")
         networkManager.bindProcessToWifiNetwork()
+        // Iniciar monitor de estado de cámara y botón físico
+        startHeartbeat()
         // Buscar actualizaciones silenciosamente al inicio
         checkForAppUpdates()
     }
@@ -62,6 +66,66 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     fun dismissAppUpdate() {
         updateManager.resetState()
+    }
+
+    // === GESTIÓN DE GALERÍA Y ARCHIVOS MICROSD ===
+    val mediaExplorer = com.sjcam.controller.media.MediaExplorer(apiClient)
+    val downloadManager = com.sjcam.controller.media.MediaDownloadManager(application)
+
+    private val _mediaItems = MutableStateFlow<List<com.sjcam.controller.data.CameraMediaItem>>(emptyList())
+    val mediaItems: StateFlow<List<com.sjcam.controller.data.CameraMediaItem>> = _mediaItems.asStateFlow()
+
+    private val _isScanningMedia = MutableStateFlow(false)
+    val isScanningMedia: StateFlow<Boolean> = _isScanningMedia.asStateFlow()
+
+    private val _mediaFilter = MutableStateFlow(MediaFilter.ALL)
+    val mediaFilter: StateFlow<MediaFilter> = _mediaFilter.asStateFlow()
+
+    private val _selectedMediaToPlay = MutableStateFlow<com.sjcam.controller.data.CameraMediaItem?>(null)
+    val selectedMediaToPlay: StateFlow<com.sjcam.controller.data.CameraMediaItem?> = _selectedMediaToPlay.asStateFlow()
+
+    private val _selectedPhotoToView = MutableStateFlow<com.sjcam.controller.data.CameraMediaItem?>(null)
+    val selectedPhotoToView: StateFlow<com.sjcam.controller.data.CameraMediaItem?> = _selectedPhotoToView.asStateFlow()
+
+    val downloadProgress = downloadManager.downloadProgress
+    val downloadedFiles = downloadManager.downloadedFiles
+
+    fun setMediaFilter(filter: MediaFilter) {
+        _mediaFilter.value = filter
+    }
+
+    fun refreshMediaList() {
+        viewModelScope.launch {
+            _isScanningMedia.value = true
+            try {
+                val list = mediaExplorer.scanAllMedia(apiClient.cameraBaseUrl)
+                _mediaItems.value = list
+                downloadManager.checkExistingDownloads()
+            } catch (e: Exception) {
+                AppLogger.e(TAG, "Error escaneando medios: ${e.message}")
+            } finally {
+                _isScanningMedia.value = false
+            }
+        }
+    }
+
+    fun downloadMedia(item: com.sjcam.controller.data.CameraMediaItem) {
+        viewModelScope.launch {
+            downloadManager.downloadFile(item)
+        }
+    }
+
+    fun playVideo(item: com.sjcam.controller.data.CameraMediaItem) {
+        _selectedMediaToPlay.value = item
+    }
+
+    fun viewPhoto(item: com.sjcam.controller.data.CameraMediaItem) {
+        _selectedPhotoToView.value = item
+    }
+
+    fun closeMediaViewer() {
+        _selectedMediaToPlay.value = null
+        _selectedPhotoToView.value = null
     }
 
     fun updateCameraIp(ip: String) {
@@ -238,10 +302,11 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     private fun startHeartbeat() {
         heartbeatJob?.cancel()
         heartbeatJob = viewModelScope.launch {
-            AppLogger.i(TAG, "Heartbeat continuo activado (ping cada 4s para mantener activo el chip Novatek y LIVE555)...")
-            while (isActive && _cameraStatus.value.isLiveStreaming) {
-                delay(4000)
+            AppLogger.i(TAG, "Monitor activo de cámara y botón físico iniciado (ping cada 2.5s)...")
+            while (isActive) {
+                delay(2500)
                 try {
+                    // 1. Telemetría de batería y conexión
                     val batt = apiClient.getBattery()
                     batt.onSuccess { resp ->
                         val batteryVal = resp.value?.toIntOrNull()
@@ -249,8 +314,28 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                             _cameraStatus.update { it.copy(isConnected = true, batteryLevel = batteryVal) }
                         }
                     }
+
+                    // 2. Detección en tiempo real de botón físico de grabación (cmd=2001)
+                    val recCheck = apiClient.executeCommand(2001)
+                    recCheck.onSuccess { resp ->
+                        val isCameraRecording = (resp.status == 1 || resp.value == "1" || resp.rawXml.contains("<Status>1</Status>"))
+                        val wasRecording = _cameraStatus.value.isRecording
+
+                        if (isCameraRecording != wasRecording) {
+                            AppLogger.i(TAG, "¡Cambio de estado detectado desde botón físico de la cámara! Grabando: $isCameraRecording")
+                            _cameraStatus.update { it.copy(isRecording = isCameraRecording) }
+
+                            // Si se presionó el botón físico y la previsualización en vivo está activa,
+                            // resincronizar LibVLC para que el video continúe sin interrupción
+                            if (_cameraStatus.value.isLiveStreaming) {
+                                delay(600)
+                                val currentStatus = _cameraStatus.value
+                                playerManager.startStream(currentStatus.rtspUrl, currentStatus.forceTcp)
+                            }
+                        }
+                    }
                 } catch (e: Exception) {
-                    AppLogger.w(TAG, "Heartbeat ping fallido: ${e.message}")
+                    // Fallos de timeout si la cámara se apaga
                 }
             }
         }
@@ -259,6 +344,24 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     private fun stopHeartbeat() {
         heartbeatJob?.cancel()
         heartbeatJob = null
+    }
+
+    // === GESTIÓN WI-FI IN-APP ===
+    private val _wifiStatusMessage = MutableStateFlow<String?>(null)
+    val wifiStatusMessage: StateFlow<String?> = _wifiStatusMessage.asStateFlow()
+
+    fun connectToCameraWifi(ssid: String, pass: String) {
+        networkManager.connectDirectToWifi(ssid, pass) { msg ->
+            _wifiStatusMessage.value = msg
+        }
+    }
+
+    fun openSystemWifiPanel() {
+        networkManager.openSystemWifiSettings()
+    }
+
+    fun clearWifiStatus() {
+        _wifiStatusMessage.value = null
     }
 
     fun sendRawCommand(cmdStr: String, parStr: String) {

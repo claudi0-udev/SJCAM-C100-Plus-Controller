@@ -12,6 +12,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.BatteryUnknown
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -45,6 +46,20 @@ fun LiveControlScreen(viewModel: CameraViewModel) {
     }
 
     var showConfigDialog by remember { mutableStateOf(false) }
+    var showWifiDialog by remember { mutableStateOf(false) }
+
+    var recordingSeconds by remember { mutableStateOf(0) }
+    LaunchedEffect(status.isRecording) {
+        if (status.isRecording) {
+            recordingSeconds = 0
+            while (true) {
+                kotlinx.coroutines.delay(1000)
+                recordingSeconds++
+            }
+        } else {
+            recordingSeconds = 0
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -82,6 +97,17 @@ fun LiveControlScreen(viewModel: CameraViewModel) {
                         color = Color.White,
                         fontSize = 12.sp
                     )
+                    Spacer(Modifier.width(4.dp))
+                    IconButton(
+                        onClick = { showWifiDialog = true },
+                        modifier = Modifier.size(28.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.Wifi,
+                            contentDescription = "Conectar Wi-Fi",
+                            tint = if (isBoundToWifi) Color(0xFF00E676) else Color(0xFF00E5FF)
+                        )
+                    }
                 }
 
                 // Batería
@@ -178,7 +204,10 @@ fun LiveControlScreen(viewModel: CameraViewModel) {
                             .background(Color.Red, CircleShape)
                     )
                     Spacer(Modifier.width(6.dp))
-                    Text("REC", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    val minutes = recordingSeconds / 60
+                    val seconds = recordingSeconds % 60
+                    val timeText = String.format(java.util.Locale.US, "%02d:%02d", minutes, seconds)
+                    Text("REC $timeText", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp)
                 }
             }
 
@@ -343,6 +372,98 @@ fun LiveControlScreen(viewModel: CameraViewModel) {
             dismissButton = {
                 TextButton(onClick = { showConfigDialog = false }) {
                     Text("Cancelar")
+                }
+            }
+        )
+    }
+
+    // Modal de Conexión Wi-Fi In-App
+    if (showWifiDialog) {
+        var ssidInput by remember { mutableStateOf("C100+_") }
+        var passwordInput by remember { mutableStateOf("12345678") }
+        var connectionStatusText by remember { mutableStateOf("") }
+
+        AlertDialog(
+            onDismissRequest = { showWifiDialog = false },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Wifi, contentDescription = null, tint = Color(0xFF00E5FF))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Conectar a Cámara C100+")
+                }
+            },
+            text = {
+                Column(
+                    modifier = Modifier.verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text(
+                        "Conéctate directamente a la red Wi-Fi de la cámara sin salir de la app (Android 10+), o mediante el panel flotante.",
+                        fontSize = 12.sp,
+                        color = Color.LightGray
+                    )
+
+                    OutlinedTextField(
+                        value = ssidInput,
+                        onValueChange = { ssidInput = it },
+                        label = { Text("Nombre Wi-Fi (SSID)") },
+                        placeholder = { Text("Ej: C100+_e41029") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    OutlinedTextField(
+                        value = passwordInput,
+                        onValueChange = { passwordInput = it },
+                        label = { Text("Contraseña Wi-Fi") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    if (connectionStatusText.isNotBlank()) {
+                        Surface(
+                            color = Color(0xFF1E3A4A),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                text = connectionStatusText,
+                                color = Color(0xFF80D8FF),
+                                fontSize = 12.sp,
+                                modifier = Modifier.padding(10.dp)
+                            )
+                        }
+                    }
+
+                    HorizontalDivider(color = Color(0xFF333333))
+
+                    OutlinedButton(
+                        onClick = {
+                            viewModel.networkManager.openSystemWifiSettings()
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Abrir Panel Wi-Fi Flotante", fontSize = 12.sp)
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        viewModel.networkManager.connectDirectToWifi(ssidInput, passwordInput) { msg ->
+                            connectionStatusText = msg
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00E5FF), contentColor = Color.Black)
+                ) {
+                    Text("Conectar")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showWifiDialog = false }) {
+                    Text("Cerrar")
                 }
             }
         )
